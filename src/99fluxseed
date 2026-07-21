@@ -1,0 +1,129 @@
+#! /bin/sh
+# FluxBilling: generate cloud-init NoCloud seed for subiquity autoinstall
+# from kernel cmdline (fluxhost= fluxpass= fluxcidr= ip= BOOTIF=).
+# Injected into the official casper initrd by build.sh; runs as a
+# casper-bottom hook with the live root mounted at /root.
+
+PREREQ=""
+DESCRIPTION="FluxBilling: generating autoinstall seed..."
+
+prereqs()
+{
+       echo "$PREREQ"
+}
+
+case $1 in
+# get pre-requisites
+prereqs)
+       prereqs
+       exit 0
+       ;;
+esac
+
+. /scripts/casper-functions
+
+log_begin_msg "$DESCRIPTION"
+
+C=$(cat /proc/cmdline)
+
+# MANUAL mode: the menu drops the `autoinstall` keyword. Bail out WITHOUT
+# writing the NoCloud seed - subiquity treats any autoinstall: key in
+# cloud-init user-data as "go ahead and install" even without the kernel
+# arg, which would silently wipe the disk on a manual install.
+if ! echo "$C" | tr ' ' '\n' | grep -qx autoinstall; then
+    log_end_msg
+    exit 0
+fi
+
+zget() {
+    echo "$C" | tr ' ' '\n' | sed -n "s/^$1=//p" | head -n1
+}
+
+H=$(zget fluxhost)
+[ -n "$H" ] || H=fluxserver
+P=$(zget fluxpass)
+[ -n "$P" ] || P=fluxbilling
+CIDR=$(zget fluxcidr)
+IPCFG=$(zget ip)
+IP=$(echo "$IPCFG" | cut -d: -f1)
+GW=$(echo "$IPCFG" | cut -d: -f3)
+MAC=$(zget BOOTIF | sed 's/^01-//' | tr - :)
+
+# escape for sed replacement
+HS=$(echo "$H" | sed 's/[\/&]/\\&/g')
+PS=$(echo "$P" | sed 's/[\/&]/\\&/g')
+
+D=/root/var/lib/cloud/seed/nocloud
+mkdir -p "$D"
+
+cat > "$D/meta-data" <<EOF
+instance-id: fluxbilling-$H
+local-hostname: $H
+EOF
+
+# template: no shell expansion (quoted heredoc), placeholders swapped after
+cat > "$D/user-data" <<'ZEOF'
+#cloud-config
+autoinstall:
+  version: 1
+  refresh-installer:
+    update: no
+  apt:
+    disable_suites: [security]
+    primary:
+      - arches: [default]
+        uri: http://archive.ubuntu.com/ubuntu/
+  ssh:
+    install-server: true
+    allow-pw: true
+  storage:
+    layout:
+      name: direct
+    swap:
+      size: 0
+  packages:
+    - openssh-server
+  user-data:
+    package_update: false
+    package_upgrade: false
+  interactive-sections: []
+  identity:
+    hostname: '@ZH@'
+    username: user
+    password: "$6$0kWT.SxO9YuGjFvn$KvhshBQmh/Y2YZOtLlz.B18HzVwKt9a6GHqNNot9FXucE5Xi3G09wmOvMFf6neReKahGysKMHNz2J50Shnybm."
+  late-commands:
+    - |
+      curtin in-target --target=/target -- bash -c 'echo root:@ZP@ | chpasswd'
+    - |
+      curtin in-target --target=/target -- bash -c 'echo user:@ZP@ | chpasswd'
+    - |
+      curtin in-target --target=/target -- sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+    - |
+      curtin in-target --target=/target -- sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT="quiet splash"/GRUB_CMDLINE_LINUX_DEFAULT="quiet splash net.ifnames=0 biosdevname=0"/' /etc/default/grub
+    - |
+      curtin in-target --target=/target -- update-grub
+    - |
+      curtin in-target --target=/target -- bash -c 'echo "deb http://security.ubuntu.com/ubuntu $(lsb_release -cs)-security main restricted universe multiverse" >> /etc/apt/sources.list'
+ZEOF
+
+sed -i "s/@ZH@/$HS/g; s/@ZP@/$PS/g" "$D/user-data"
+
+# static network for the installed system, matched by boot NIC MAC
+if [ -n "$IP" ] && [ -n "$CIDR" ] && [ -n "$GW" ] && [ -n "$MAC" ]; then
+cat >> "$D/user-data" <<ZEOF
+  network:
+    version: 2
+    ethernets:
+      fluxnic:
+        match:
+          macaddress: "$MAC"
+        addresses: [ $IP/$CIDR ]
+        routes:
+          - to: default
+            via: $GW
+        nameservers:
+          addresses: [8.8.8.8, 1.1.1.1]
+ZEOF
+fi
+
+log_end_msg

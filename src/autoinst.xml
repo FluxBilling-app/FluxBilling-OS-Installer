@@ -1,0 +1,94 @@
+<?xml version="1.0"?>
+<!DOCTYPE profile>
+<!-- FluxBilling AutoYaST profile (openSUSE Leap 15.6).
+     Embedded in the FluxBilling image and injected into the SUSE installer
+     initrd as /flux-autoinst.xml (autoyast=file:///flux-autoinst.xml; flux-
+     prefix so YaST's automatic /autoinst.xml probe never fires). Identity comes
+     from the kernel command line (fluxhost= fluxpass=): the pre-script below
+     rewrites the @ZH@/@ZP@ placeholders into /tmp/profile/modified.xml, which
+     AutoYaST then uses instead of this file. Static network is configured by
+     linuxrc (ifcfg=/hostname= boot args) and carried into the installed
+     system by keep_install_network. No <partitioning> section: YaST uses its
+     automatic whole-disk proposal. -->
+<profile xmlns="http://www.suse.com/1.0/yast2ns" xmlns:config="http://www.suse.com/1.0/configns">
+  <general>
+    <mode>
+      <confirm config:type="boolean">false</confirm>
+      <final_reboot config:type="boolean">true</final_reboot>
+    </mode>
+  </general>
+  <scripts>
+    <pre-scripts config:type="list">
+      <script>
+        <filename>fluxpre.sh</filename>
+        <interpreter>shell</interpreter>
+        <source><![CDATA[#!/bin/sh
+C=$(cat /proc/cmdline)
+zget() { echo "$C" | tr ' ' '\n' | sed -n "s/^$1=//p" | head -n1; }
+H=$(zget fluxhost); [ -n "$H" ] || H=fluxserver
+P=$(zget fluxpass); [ -n "$P" ] || P=fluxbilling
+HS=$(echo "$H" | sed 's/[\/&]/\\&/g')
+PS=$(echo "$P" | sed 's/[\/&]/\\&/g')
+cp /tmp/profile/autoinst.xml /tmp/profile/modified.xml
+sed -i "s/@ZH@/$HS/g; s/@ZP@/$PS/g" /tmp/profile/modified.xml
+]]></source>
+      </script>
+    </pre-scripts>
+    <post-scripts config:type="list">
+      <script>
+        <filename>fluxpost.sh</filename>
+        <interpreter>shell</interpreter>
+        <source><![CDATA[#!/bin/sh
+sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+]]></source>
+      </script>
+    </post-scripts>
+  </scripts>
+  <networking>
+    <keep_install_network config:type="boolean">true</keep_install_network>
+    <dns>
+      <hostname>@ZH@</hostname>
+    </dns>
+  </networking>
+  <users config:type="list">
+    <user>
+      <username>root</username>
+      <user_password>@ZP@</user_password>
+      <encrypted config:type="boolean">false</encrypted>
+    </user>
+    <user>
+      <username>user</username>
+      <fullname>Default User</fullname>
+      <user_password>@ZP@</user_password>
+      <encrypted config:type="boolean">false</encrypted>
+    </user>
+  </users>
+  <software>
+    <patterns config:type="list">
+      <pattern>base</pattern>
+    </patterns>
+    <packages config:type="list">
+      <package>openssh</package>
+      <package>curl</package>
+      <package>wget</package>
+    </packages>
+  </software>
+  <services-manager>
+    <default_target>multi-user</default_target>
+    <services>
+      <enable config:type="list">
+        <service>sshd</service>
+      </enable>
+    </services>
+  </services-manager>
+  <keyboard>
+    <keymap>english-us</keymap>
+  </keyboard>
+  <language>
+    <language>en_US</language>
+  </language>
+  <timezone>
+    <timezone>Europe/Bucharest</timezone>
+    <hwclock>UTC</hwclock>
+  </timezone>
+</profile>

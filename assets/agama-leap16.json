@@ -1,0 +1,18 @@
+{
+  "product": {
+    "id": "Leap_16.0"
+  },
+  "root": {
+    "password": "fluxbilling",
+    "hashedPassword": false
+  },
+  "scripts": {
+    "post": [
+      {
+        "name": "flux-identity",
+        "chroot": false,
+        "content": "#!/bin/sh\n# FluxBilling: identity from kernel cmdline (fluxhost= fluxpass=).\n# Runs in the live env after install; target is mounted at /mnt.\nC=$(cat /proc/cmdline)\nzget() { echo \"$C\" | tr ' ' '\\n' | sed -n \"s/^$1=//p\" | head -n1; }\nH=$(zget fluxhost); [ -n \"$H\" ] || H=fluxserver\nP=$(zget fluxpass); [ -n \"$P\" ] || P=fluxbilling\necho \"$H\" > /mnt/etc/hostname\nchroot /mnt /bin/sh -c \"echo root:$P | chpasswd\"\nchroot /mnt /bin/sh -c \"id user >/dev/null 2>&1 || useradd -m -c 'Default User' user\"\nchroot /mnt /bin/sh -c \"echo user:$P | chpasswd\"\nsed -i 's/^#\\?PermitRootLogin.*/PermitRootLogin yes/' /mnt/etc/ssh/sshd_config\nchroot /mnt systemctl enable sshd\n"
+      }
+    ]
+  }
+}

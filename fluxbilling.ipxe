@@ -1,0 +1,440 @@
+#!ipxe
+# Boot menu for the FluxBilling OS installer, baked into the ISO image.
+# Distro image + squashfs URLs live in the block below. Host, network and
+# password get asked at runtime and ride out on the kernel command line.
+
+set ctl:hex 1b
+# FluxBilling console palette: two-tone mono + one cyan accent.
+# ESC mechanism (ctl:hex 1b + ${ctl:string}) preserved untouched.
+#   ink  = bold white : wordmark, field labels, the active question
+#   meta = plain white: version, portal, hints, values - reads as gray
+#   acc  = cyan 36    : the single restrained accent (a leading '>')
+#   err  = red 31     : genuine failures only
+set b_on ${ctl:string}[1m
+set b_off ${ctl:string}[22m
+set rst ${ctl:string}[0m
+set cl_wht ${ctl:string}[37m
+set cl_cyn ${ctl:string}[36m
+set cl_red ${ctl:string}[31m
+set ink ${b_on}${cl_wht}
+set meta ${cl_wht}
+set acc ${cl_cyn}
+set err ${cl_red}
+
+set app_name Flux Installer
+set app_ver 1.0
+set portal FluxBilling.app
+
+# --- image + squashfs endpoints (keep the sqfs tag and iso URL in sync) ---
+set img2204 http://releases.ubuntu.com/22.04.5/ubuntu-22.04.5-live-server-amd64.iso
+set img2404 http://releases.ubuntu.com/24.04.4/ubuntu-24.04.4-live-server-amd64.iso
+set img2510 http://releases.ubuntu.com/25.10/ubuntu-25.10-live-server-amd64.iso
+set img2604 http://releases.ubuntu.com/26.04/ubuntu-26.04-live-server-amd64.iso
+set sqfs2204 https://github.com/netbootxyz/ubuntu-squash/releases/download/22.04.5-be230164
+set sqfs2404 https://github.com/netbootxyz/ubuntu-squash/releases/download/24.04.4-717d3a1a
+set sqfs2510 https://github.com/netbootxyz/ubuntu-squash/releases/download/25.10-64f54a86
+set sqfs2604 https://github.com/netbootxyz/ubuntu-squash/releases/download/26.04-22041617
+# ^ gotcha on version bumps: ubuntu-squash ships both amd64 and arm64 under
+# almost-identical tags, and the asset filenames collide. Before pinning a new
+# tag, confirm you grabbed the x86-64 build - PE machine field reads 0x8664 and
+# a bzImage carries the HdrS magic. Pin the arm64 vmlinuz by mistake and it
+# won't run on x86 at all: EFI LoadImage bails with 0x7f048183 "Could not load
+# image".
+set ub_mirror http://archive.ubuntu.com
+set deb_mirror http://deb.debian.org
+set alma_url http://repo.almalinux.org/almalinux
+set rocky_url http://download.rockylinux.org/pub/rocky
+set centos_url http://mirror.stream.centos.org
+set leap156_url http://download.opensuse.org/distribution/leap/15.6/repo/oss
+set leap160_url http://download.opensuse.org/distribution/leap/16.0/repo/oss
+# Agama reads its profile straight out of the injected initrd file - Agama's
+# URL handling supports the file scheme, so no host has to serve it (the old
+# http://isodisk.atwebpages.com/... copy 404s, and an unreachable profile stops
+# the install dead). Point this at an http(s) URL only if you want a profile
+# that is edited without rebuilding the image.
+set agama_url file:///run/flux-agama.json
+set ns1 8.8.8.8
+set ns2 1.1.1.1
+
+console --x 800 --y 600 --picture logo.png ||
+
+# Stamp each bundled helper file with its cpio path exactly once - they get
+# appended to every Linux boot and simply go unread where they don't apply.
+# This must be imgargs, never initrd: EMBED already loaded these images, so
+# `initrd <name>` would try to DOWNLOAD the bare name, die with "Operation not
+# supported" (no scheme, no base URI) before the cpio name is ever set, then
+# splice the file verbatim ahead of the real compressed initrd -> "Initramfs
+# unpacking failed: invalid magic" -> kernel panic. imgargs instead writes the
+# cmdline (= the cpio path) onto the in-memory image, so iPXE cpio-wraps it the
+# right way.
+imgargs preseed.cfg flux-preseed.cfg ||
+imgargs 99fluxseed scripts/casper-bottom/99fluxseed mode=755 mkdir=-1 ||
+imgargs param.conf conf/param.conf mkdir=-1 ||
+imgargs ks.cfg flux-ks.cfg ||
+imgargs autoinst.xml flux-autoinst.xml ||
+# Agama is the one family whose installer runs AFTER switch_root, so a profile
+# at the initrd root is gone by the time inst.auto is read - and /run there is
+# a tmpfs mount that would shadow an injected file anyway. So the profile goes
+# in at the root and a dracut pre-pivot hook copies it into the LIVE /run,
+# which systemd moves across the pivot (Agama's own hooks pass state the same
+# way). inst.auto then reads file:///run/flux-agama.json.
+imgargs agama-leap16.json flux-agama.json ||
+imgargs 50-flux-agama.sh var/lib/dracut/hooks/pre-pivot/50-flux-agama.sh mode=755 mkdir=-1 ||
+# logo.png is never read by a kernel, but it MUST be stamped too. iPXE splices
+# EVERY still-registered image into the initrd chain (image/initrd.c skips only
+# IMAGE_HIDDEN; the running script and the executing kernel are temporarily
+# unregistered, so they drop out by themselves - logo.png does not). Without a
+# cpio path it goes in verbatim, and a raw PNG at the head of the chain means
+# "Initramfs unpacking failed: invalid magic at start of compressed archive"
+# -> nothing unpacks -> "Cannot open root device" panic on EVERY entry.
+imgargs logo.png flux-logo.png ||
+# ^ the flux-* prefixes are deliberate. d-i will AUTO-LOAD /preseed.cfg from
+# the initrd root, and YaST sniffs for /autoinst.xml on the media, both with no
+# boot arg at all - so a plainly-named file would silently switch autoinstall
+# (disk wipe included) back on during a MANUAL install. Under the flux-* names
+# nothing touches them unless the automated-mode args further down say so.
+
+:banner
+echo
+echo
+echo   ${ink}${app_name} v${app_ver}${rst}   ${meta}Powered by ${portal}${rst}
+echo   ${meta}------------------------------------------------------------${rst}
+echo
+echo   ${meta}The hosting platform that bills, provisions, and tracks the rack.${rst}
+echo   ${meta}Automated billing and DCIM. Built like a native app.${rst}
+echo
+
+:net_pick
+echo
+echo   ${acc}>${rst} ${ink}Step 1 of 4   Network${rst}
+echo   ${meta}------------------------------------------------------------${rst}
+echo
+set idx:int32 0
+:net_row
+isset ${net${idx}/mac} || goto net_row_end
+echo      ${acc}[${idx}]${rst}  ${ink}net${idx}${rst}   ${meta}MAC ${net${idx}/mac}${rst}
+inc idx
+goto net_row
+:net_row_end
+echo
+echo   ${meta}Pick the port whose cable is connected to your network.${rst}
+echo
+echo -n   ${ink}Port number${rst} ${meta}[ENTER = 0]:${rst} ${} && read nic
+isset ${nic} || set nic 0
+ifclose
+ifopen net${nic} || goto net_bad
+isset ${editing} && goto commit ||
+goto ask_ip
+
+:net_bad
+echo   ${err}Interface net${nic} not found.${rst}
+clear nic
+goto net_pick
+
+:ask_ip
+echo
+echo   ${acc}>${rst} ${ink}Step 2 of 4   Address${rst}
+echo   ${meta}------------------------------------------------------------${rst}
+echo
+echo -n   ${ink}IP / subnet${rst} ${meta}(e.g. 203.0.113.111/27):${rst} ${} && read cidr_in
+isset ${cidr_in} || goto ask_ip
+fluxcidr ${cidr_in} || goto ip_bad
+set ip ${fluxip}
+set nm ${fluxmask}
+set plen ${fluxprefix}
+goto ask_gw
+
+:ip_bad
+echo
+echo   ${err}Use IP/prefix format, e.g. 203.0.113.111/27 (prefix 1-31).${rst}
+clear cidr_in
+goto ask_ip
+
+:ask_gw
+echo
+echo -n   ${ink}Gateway${rst} ${meta}[ENTER = ${fluxgw}]:${rst} ${} && read gwip
+isset ${gwip} || set gwip ${fluxgw}
+isset ${editing} && goto commit ||
+goto ask_host
+
+:ask_host
+echo
+echo   ${acc}>${rst} ${ink}Step 3 of 4   Hostname${rst}
+echo
+echo -n   ${ink}Hostname${rst}${meta}:${rst} ${} && read hostnm
+isset ${hostnm} || goto ask_host
+isset ${editing} && goto commit ||
+goto ask_pw
+
+:ask_pw
+clear pw
+form Step 4 of 4 - Root password for ${hostnm}
+item --secret pw  Set the root password for the installed OS
+present || goto ask_pw
+isset ${pw} || goto ask_pw
+set rootpw ${pw}
+clear pw
+
+:commit
+clear editing
+set net${nic}/ip ${ip}
+set net${nic}/netmask ${nm}
+set net${nic}/gateway ${gwip}
+set net${nic}/dns ${ns1}
+set macid 01-${netX/mac:hexhyp}
+set net_kargs ip=${ip}::${gwip}:${nm}:${hostnm}::none:${ns1}:${ns2} BOOTIF=${macid} hostname=${hostnm}
+set flux_kargs fluxhost=${hostnm} fluxpass=${rootpw} fluxcidr=${plen}
+# On Dell iDRAC virtual consoles the mgag200 KMS driver spins up a
+# drm_fb_helper worker that locks the framebuffer roughly 2.8s into early boot.
+# nomodeset on its own won't stop casper's initramfs from binding it, so the
+# module is hard-blacklisted as well and efifb/GOP drives the console instead.
+# Whichever console= comes LAST wins /dev/console (= where installer UIs draw),
+# so :os_pick appends ${con_kargs} to match the mode: automated lists ttyS0
+# last so it's watchable over SOL, manual lists tty0 last so the UI lands on
+# the iDRAC/video console.
+set vga_kargs nomodeset modprobe.blacklist=mgag200
+# Static-network preseed for d-i, fed in under BOTH modes - the values are
+# already keyed in by hand; manual mode just keeps prompting for the rest.
+set di_net net.ifnames=0 biosdevname=0 netcfg/choose_interface=auto netcfg/disable_dhcp=true netcfg/get_ipaddress=${ip} netcfg/get_netmask=${nm} netcfg/get_gateway=${gwip} netcfg/get_nameservers=${ns1} netcfg/confirm_static=true netcfg/get_hostname=${hostnm} netcfg/hostname=${hostnm}
+# d-i credentials - wired up for autoinstall only
+set di_pass passwd/root-password=${rootpw} passwd/root-password-again=${rootpw} passwd/user-password=${rootpw} passwd/user-password-again=${rootpw}
+
+:review
+menu Review your setup - fix anything before you continue
+item go_os Continue to OS selection
+item --gap
+item fix_if Interface ........ net${nic}
+item fix_ip IP / subnet ...... ${ip}/${plen}
+item fix_gw Gateway .......... ${gwip}
+item fix_host Hostname ......... ${hostnm}
+item fix_pw Password ......... hidden (re-enter to change)
+choose csel || goto review
+goto ${csel}
+
+:fix_if
+set editing 1
+clear nic
+goto net_pick
+
+:fix_ip
+set editing 1
+clear cidr_in
+goto ask_ip
+
+:fix_gw
+set editing 1
+clear gwip
+goto ask_gw
+
+:fix_host
+set editing 1
+clear hostnm
+goto ask_host
+
+:fix_pw
+set editing 1
+goto ask_pw
+
+:go_os
+goto os_pick
+
+# ---- OS menu. ${amode} flips between AUTOMATED and MANUAL: automated
+# populates the per-family answer-file args just below, manual wipes them - so
+# each entry pulls and boots the identical installer, only interactively.
+:os_pick
+isset ${amode} || set amode auto
+iseq ${amode} manual && goto kargs_manual ||
+set mode_lbl AUTOMATED
+set mode_seg [ Automated ] Manual
+set con_kargs console=tty0 console=ttyS0,115200n8
+set ubu_auto autoinstall ds=nocloud ${flux_kargs}
+set di_auto auto=true priority=critical preseed/file=/flux-preseed.cfg ${di_pass}
+set ks_auto inst.ks=file:///flux-ks.cfg ${flux_kargs}
+set ay_auto autoyast=file:///flux-autoinst.xml ${flux_kargs}
+# inst.install takes a VALUE in Agama (=0 stops after reading the profile so a
+# human can review it); the bare flag was relying on how a valueless option
+# happens to parse. Spell the intent out.
+set ag_auto inst.auto=${agama_url} inst.install=1 inst.finish=reboot ${flux_kargs}
+goto kargs_done
+
+:kargs_manual
+set mode_lbl MANUAL
+set mode_seg Automated [ Manual ]
+set con_kargs console=ttyS0,115200n8 console=tty0
+clear ubu_auto
+clear di_auto
+clear ks_auto
+clear ay_auto
+clear ag_auto
+
+:kargs_done
+menu ${app_name} v${app_ver}   ${hostnm}   ${ip}/${plen} gw ${gwip}   ${mode_lbl}
+item toggle_mode Install mode: ${mode_seg}
+item ubu2604 Ubuntu 26.04 LTS
+item ubu2510 Ubuntu 25.10
+item ubu2404 Ubuntu 24.04 LTS
+item ubu2204 Ubuntu 22.04 LTS
+item ubu2004 Ubuntu 20.04 LTS
+item ubu1804 Ubuntu 18.04 LTS
+item deb13 Debian 13
+item deb12 Debian 12
+item deb11 Debian 11
+item al10 AlmaLinux 10
+item al9 AlmaLinux 9
+item al8 AlmaLinux 8
+item rk10 Rocky Linux 10
+item rk9 Rocky Linux 9
+item rk8 Rocky Linux 8
+item cs10 CentOS Stream 10
+item cs9 CentOS Stream 9
+item leap160 openSUSE Leap 16.0
+item leap156 openSUSE Leap 15.6
+item settings Back to settings
+choose --default ubu2604 pick || goto os_pick
+goto ${pick}
+
+:toggle_mode
+iseq ${amode} manual && set amode auto || set amode manual
+goto os_pick
+
+# ---- Ubuntu 22.04 and up (casper/subiquity): install ISO streams into RAM ----
+:ubu2604
+set rtag 2604
+goto boot_casper
+
+:ubu2510
+set rtag 2510
+goto boot_casper
+
+:ubu2404
+set rtag 2404
+goto boot_casper
+
+:ubu2204
+set rtag 2204
+goto boot_casper
+
+:boot_casper
+kernel --name kboot ${sqfs${rtag}}/vmlinuz initrd=initrd.magic ${net_kargs} url=${img${rtag}} ${ubu_auto} ${vga_kargs} ${con_kargs} || goto boot_fail
+set iurl ${sqfs${rtag}}/initrd
+goto launch
+
+# ---- Ubuntu 18/20 and Debian 11/12/13, via the d-i netboot images ----
+:ubu2004
+set di_base ${ub_mirror}/ubuntu/dists/focal-updates/main/installer-amd64/current/legacy-images/netboot/ubuntu-installer/amd64
+goto ubu_di
+
+:ubu1804
+set di_base ${ub_mirror}/ubuntu/dists/bionic-updates/main/installer-amd64/current/images/netboot/ubuntu-installer/amd64
+goto ubu_di
+
+:ubu_di
+set mir_host archive.ubuntu.com
+set mir_dir /ubuntu
+goto boot_di
+
+:deb13
+set suite trixie
+goto deb_di
+
+:deb12
+set suite bookworm
+goto deb_di
+
+:deb11
+set suite bullseye
+goto deb_di
+
+:deb_di
+set di_base ${deb_mirror}/debian/dists/${suite}/main/installer-amd64/current/images/netboot/debian-installer/amd64
+set mir_host deb.debian.org
+set mir_dir /debian
+goto boot_di
+
+:boot_di
+kernel --name kboot ${di_base}/linux initrd=initrd.magic ${di_net} mirror/country=manual mirror/http/hostname=${mir_host} mirror/http/directory=${mir_dir} mirror/http/proxy= ${di_auto} ${vga_kargs} ${con_kargs} || goto boot_fail
+set iurl ${di_base}/initrd.gz
+goto launch
+
+# ---- AlmaLinux / Rocky Linux / CentOS Stream, using anaconda + kickstart ----
+# The ~800 MB stage2 is pulled from inst.repo straight into RAM, so plan on
+# 3 GB or more. The whole 10-series (Alma, Rocky, CentOS Stream) demands an
+# x86_64-v3 CPU, i.e. Haswell or newer.
+:al10
+set ks_base ${alma_url}/10
+goto boot_ks
+
+:al9
+set ks_base ${alma_url}/9
+goto boot_ks
+
+:al8
+set ks_base ${alma_url}/8
+goto boot_ks
+
+:rk10
+set ks_base ${rocky_url}/10
+goto boot_ks
+
+:rk9
+set ks_base ${rocky_url}/9
+goto boot_ks
+
+:rk8
+set ks_base ${rocky_url}/8
+goto boot_ks
+
+:cs10
+set ks_base ${centos_url}/10-stream
+goto boot_ks
+
+:cs9
+set ks_base ${centos_url}/9-stream
+goto boot_ks
+
+:boot_ks
+kernel --name kboot ${ks_base}/BaseOS/x86_64/os/images/pxeboot/vmlinuz initrd=initrd.magic ${net_kargs} inst.repo=${ks_base}/BaseOS/x86_64/os/ fluxrepo=${ks_base} inst.text ${ks_auto} ${vga_kargs} ${con_kargs} || goto boot_fail
+set iurl ${ks_base}/BaseOS/x86_64/os/images/pxeboot/initrd.img
+goto launch
+
+# ---- openSUSE Leap 15.6 - linuxrc/YaST, AutoYaST read from the injected initrd file ----
+:leap156
+kernel --name kboot ${leap156_url}/boot/x86_64/loader/linux initrd=initrd.magic install=${leap156_url} ifcfg=*=${ip}/${plen},${gwip},${ns1} hostname=${hostnm} textmode=1 ${ay_auto} ${vga_kargs} ${con_kargs} || goto boot_fail
+set iurl ${leap156_url}/boot/x86_64/loader/initrd
+goto launch
+
+# ---- openSUSE Leap 16.0 - the Agama live installer ----
+# The ~400 MB live squashfs streams into RAM across the data NIC. Under
+# autoinstall the agama profile is fetched from ${agama_url} (that's
+# assets/agama-leap16.json - make sure it's hosted there). Manual mode drops
+# you into interactive Agama: a web UI at https://<ip>, log in as root with the
+# password typed into the menu.
+:leap160
+kernel --name kboot ${leap160_url}/boot/x86_64/loader/linux initrd=initrd.magic root=live:${leap160_url}/LiveOS/squashfs.img rd.neednet=1 ${net_kargs} live.password=${rootpw} ${ag_auto} ${vga_kargs} ${con_kargs} || goto boot_fail
+set iurl ${leap160_url}/boot/x86_64/loader/initrd
+goto launch
+
+:settings
+goto review
+
+# Shared success tail for every Linux family: the kernel is already loaded, so
+# flag it (got_k) for :boot_fail cleanup, pull the initrd named in ${iurl},
+# flag that too (got_i), and hand control to the kernel.
+:launch
+set got_k 1
+initrd --name iboot ${iurl} || goto boot_fail
+set got_i 1
+boot || goto boot_fail
+
+# Release whatever the failed attempt already pulled down so the next try
+# starts clean. A flag marks each image that actually loaded; freeing purely by
+# name would flood the console with "no such image" for every one that didn't.
+:boot_fail
+isset ${got_k} && imgfree kboot ||
+isset ${got_i} && imgfree iboot ||
+clear got_k
+clear got_i
+echo
+echo   ${err}Boot failed.${rst}${meta} Check settings, network, and mirror availability.${rst}
+prompt Press any key to return to the menu...
+goto os_pick
