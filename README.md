@@ -154,6 +154,10 @@ not require a PXE stack or an afternoon of virtual media.
   <a href="https://fluxbilling.app"><b>→ See the panel</b></a>
 </p>
 
+## Thanks
+
+Thank you [@AlexIancu98](https://github.com/AlexIancu98) for your contribution.
+
 ## License
 
 **GPL-2.0-or-later** — see [LICENSE](LICENSE).
