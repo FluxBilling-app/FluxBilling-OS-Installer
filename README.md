@@ -110,6 +110,24 @@ Per-family mechanics, mirror URLs and the hard-won gotchas are documented
 inline in [fluxbilling.ipxe](fluxbilling.ipxe) and
 [src/builder.Dockerfile](src/builder.Dockerfile).
 
+### Surviving upstream moves
+
+Every URL is baked in at build time, and an ISO burned to a customer's iDRAC
+cannot be edited — so an upstream move would otherwise kill that menu entry
+forever. Two mechanisms cover it, neither of which needs FluxBilling to host
+anything:
+
+- **Fallback hosts.** A failed casper fetch retries
+  `old-releases.ubuntu.com`, where Ubuntu moves superseded point releases; the
+  d-i entries walk a country mirror and then the archive host
+  (`archive.debian.org` for a deleted Debian suite).
+  [src/fallback-test.sh](src/fallback-test.sh) boots ISOs with a dead primary
+  to prove both actually fire.
+- **A watchdog.** [upstream-watch](.github/workflows/upstream-watch.yml)
+  probes every URL the menu fetches — generated from the menu itself by
+  [src/menu-urls.sh](src/menu-urls.sh), never hand-copied — the way iPXE
+  fetches it, and opens a bump PR when Ubuntu supersedes a pinned release.
+
 ## Requirements & limits
 
 - **RAM:** Ubuntu 22.04+ stream the full live ISO to RAM — **8 GB+**.
@@ -141,12 +159,11 @@ What is and is not protected, honestly:
   installer, which carries a full CA bundle.
 - **Kernel and initrd fetches are plain HTTP and unverified** until the first
   signed `boot-*` release ships. The binary now bakes in a set of public root
-  CAs (`TRUST=` in [build.sh](build.sh)), so the https fetches iPXE does make
-  — the 22.04 GitHub release, the boot-time version manifest, mirrors that
-  redirect http→https — validate with no `ca.ipxe.org` dependency; but the
-  plain-http kernel/initrd fetches still trust the network. Run the installer
-  on a trusted management network, and cut the signed release to close the
-  gap for good.
+  CAs (`CERT=`/`TRUST=` in [build.sh](build.sh)), so the https fetches iPXE
+  does make — the 22.04 GitHub release, and mirrors that redirect http→https —
+  validate with no `ca.ipxe.org` dependency; but the plain-http kernel/initrd
+  fetches still trust the network. Run the installer on a trusted management
+  network, and cut the signed release to close the gap for good.
 - **Credentials never persist in cleartext.** The root password rides the
   kernel command line, so every family creates its accounts locked, sets the
   real password through `chpasswd` (hash only, in `/etc/shadow`), and scrubs

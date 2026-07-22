@@ -64,18 +64,11 @@ rm -rf /tmp/un
 # initramfs shell. Rewriting the `set boot<rel>` line (rather than a literal
 # URL) keeps this working across point-release bumps; :boot_casper copies it
 # into ${kbase} at entry, so the kernel line to patch is the ${kbase} one.
-# The third expression pre-latches flux_manifested so the :commit manifest
-# chainload never runs: the manifest is fetched AFTER these `set` lines and
-# may legitimately re-set boot<REL>, which would silently override the local
-# test server and make this test depend on production state.
 sed -e "s|^set boot${REL} .*|set boot${REL} http://10.0.2.2:8000|" \
     -e "s|^kernel --name kboot \${kbase}/\${kname} initrd=initrd.magic |&break=top console=ttyS0 |" \
-    -e "s|^isset \${flux_manifested} .*|set flux_manifested 1|" \
     /w/fluxbilling.ipxe > /work/test.ipxe
 grep -q "break=top" /work/test.ipxe || { echo "SED-MISSED-KERNEL-LINE"; exit 1; }
 grep -q "http://10.0.2.2:8000" /work/test.ipxe || { echo "SED-MISSED-URL"; exit 1; }
-grep -q "^set flux_manifested 1" /work/test.ipxe || { echo "SED-MISSED-MANIFEST"; exit 1; }
-grep -q "boot.fluxbilling.app" /work/test.ipxe && { echo "MANIFEST-STILL-LIVE"; exit 1; }
 python3 /w/src/logo-compose.py /w/assets/FluxBilling.png /work/logo.png
 cp /w/src/preseed.cfg /w/src/99fluxseed /w/src/param.conf \
    /w/src/ks.cfg /w/src/autoinst.xml /w/src/50-flux-agama.sh \

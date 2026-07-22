@@ -9,10 +9,6 @@
 #                so the watchdog treats any 3xx here as a warning.
 #   bulk <url>   fetched by the installer (casper/anaconda/linuxrc/dracut)
 #                with a full CA bundle - probing with -L matches the client.
-#   manifest <url>  the boot-time version manifest iPXE chainloads at :commit.
-#                Its failure is deliberately silent in the menu (a fielded ISO
-#                must still boot offline), which is exactly why it needs
-#                watching HERE - nothing else would ever report it broken.
 #
 # upstream-watch.yml consumes this instead of carrying its own hand-copied
 # list, and cross-checks the ipxe rows against the sign-boot-images.sh
@@ -127,7 +123,3 @@ for u in "$leap156" "$leap160"; do
 done
 echo "bulk https://$leap160/LiveOS/squashfs.img"
 
-# --- boot-time version manifest --------------------------------------------
-man=$(sed -n 's/.*chain --timeout [0-9]* --autofree \([^ ]*\).*/\1/p' "$MENU" | head -n1)
-[ -n "$man" ] || die "no manifest chain line found in $MENU"
-echo "manifest $man"

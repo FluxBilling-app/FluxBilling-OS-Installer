@@ -66,9 +66,8 @@ docker run --rm --platform linux/amd64 -v "$PWD":/w "$BUILDER" bash -exc '
      /w/src/flux-scrub /work/
   EMBEDLIST=/work/fluxbilling.ipxe,/work/logo.png,/work/preseed.cfg,/work/99fluxseed,/work/param.conf,/work/ks.cfg,/work/autoinst.xml,/work/agama-leap16.json,/work/50-flux-agama.sh,/work/flux-scrub
 
-  # Trusted TLS roots, baked in as fingerprints via TRUST=. This is what lets
-  # the https fetches iPXE makes (the 22.04.5 GitHub release, the boot-time
-  # version manifest at :commit, any mirror that 301s http->https) validate
+  # Trusted TLS roots. This is what lets the https fetches iPXE makes (the
+  # 22.04.5 GitHub release, and any mirror that 301s http->https) validate
   # against real public CAs instead of leaning on the ca.ipxe.org crosscert
   # over plain HTTP. Roots come from the Debian ca-certificates package baked
   # into the builder image - no network fetch, fails loudly if a name drifts.

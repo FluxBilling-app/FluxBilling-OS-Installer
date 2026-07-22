@@ -51,10 +51,8 @@ set portal FluxBilling.app
 #
 #   Since the TRUST= build change (see build.sh) the binary carries a small
 #   set of public root CAs plus the FluxBilling CA, so the https fetches iPXE
-#   DOES make - the 22.04.5 GitHub release, the version manifest at :commit,
-#   and any mirror that 301s http to https (mirror.stream.centos.org already
-#   redirects the kernel fetch today) - validate properly with NO ca.ipxe.org
-#   round-trip. http:// stays the default for iPXE fetches to keep TLS out of
+#   DOES make - the 22.04.5 GitHub release, and any mirror that 301s http to
+#   https - validate properly with NO ca.ipxe.org round-trip. http:// stays the default for iPXE fetches to keep TLS out of
 #   the boot path where it buys nothing, not because it is unverifiable.
 #
 #   The INSTALLERS - casper, anaconda, linuxrc, dracut - carry a full CA bundle
@@ -102,7 +100,7 @@ set boot2204 https://github.com/netbootxyz/ubuntu-squash/releases/download/22.04
 # moves to a DIFFERENT host on its own schedule: Debian DELETES it from
 # deb.debian.org (buster already 404s) and it survives only on
 # archive.debian.org. :di_fallback retries the archive host automatically at
-# boot; flipping a var here (or via the :commit manifest) makes it permanent.
+# boot; flipping a var here makes it permanent in the next build.
 set deb13_host deb.debian.org
 set deb12_host deb.debian.org
 set deb11_host deb.debian.org
@@ -259,23 +257,6 @@ set net${nic}/ip ${ip}
 set net${nic}/netmask ${nm}
 set net${nic}/gateway ${gwip}
 set net${nic}/dns ${ns1}
-# ---- boot-time version manifest: self-heal for ISOs already in the field ----
-# The first moment the data NIC is configured. A tiny iPXE script on
-# FluxBilling's own host re-`set`s any of the pins above (rel*, boot*, img*,
-# deb*_host, ...) so an ISO burned to a customer iDRAC keeps booting after a
-# point release supersedes a pin or a suite archives - without a rebuild.
-# Fetched over TLS validated against the root CAs baked in at build time
-# (CERT=/TRUST= in build.sh; includes the FluxBilling CA) - no ca.ipxe.org.
-# A failure costs one error line and at most --timeout, then the embedded
-# values stay authoritative - an offline management network boots as before.
-# --timeout is mandatory: an isolated iDRAC LAN that blackholes packets would
-# otherwise run iPXE's full retry machinery on EVERY boot.
-# The flag latches only on SUCCESS (the && runs just on the success path), so
-# an operator who mistypes the network, fixes it at the review screen and
-# re-enters :commit gets another try - which is the whole point of that
-# screen. Keep the manifest a plain list of `set` lines; list derived vars
-# (img*, boot*) explicitly.
-isset ${flux_manifested} || chain --timeout 5000 --autofree https://boot.fluxbilling.app/flux-versions.ipxe && set flux_manifested 1 ||
 set macid 01-${netX/mac:hexhyp}
 set net_kargs ip=${ip}::${gwip}:${nm}:${hostnm}::none:${ns1}:${ns2} BOOTIF=${macid} hostname=${hostnm}
 set flux_kargs fluxhost=${hostnm} fluxpass=${rootpw} fluxcidr=${plen}
@@ -489,9 +470,9 @@ goto boot_di
 # but :di_fallback turns the resulting fetch failure into one automatic retry
 # against the archive host, so an archived suite keeps installing from ISOs
 # already in the field. Make it permanent (and skip the failed first fetch)
-# by flipping the suite's deb*_host var at the top, or via the :commit
-# manifest. Alma/Rocky/CentOS/Leap paths roll forward in place; Ubuntu casper
-# has its own :casper_fallback.
+# in the next build by flipping the suite's deb*_host var at the top.
+# Alma/Rocky/CentOS/Leap paths roll forward in place; Ubuntu casper has its
+# own :casper_fallback.
 :deb13
 set suite trixie
 set di_host ${deb13_host}
