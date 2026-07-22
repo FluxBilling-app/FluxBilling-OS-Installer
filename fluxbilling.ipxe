@@ -52,7 +52,8 @@ set portal FluxBilling.app
 #   Since the TRUST= build change (see build.sh) the binary carries a small
 #   set of public root CAs plus the FluxBilling CA, so the https fetches iPXE
 #   DOES make - the 22.04.5 GitHub release, and any mirror that 301s http to
-#   https - validate properly with NO ca.ipxe.org round-trip. http:// stays the default for iPXE fetches to keep TLS out of
+#   https - validate properly with NO ca.ipxe.org round-trip. http:// stays
+#   the default for iPXE fetches to keep TLS out of
 #   the boot path where it buys nothing, not because it is unverifiable.
 #
 #   The INSTALLERS - casper, anaconda, linuxrc, dracut - carry a full CA bundle
@@ -218,6 +219,11 @@ fluxcidr ${cidr_in} || goto ip_bad
 set ip ${fluxip}
 set nm ${fluxmask}
 set plen ${fluxprefix}
+# Every other prompt returns straight to the review screen when editing; this
+# one used to fall through to :ask_gw, so fixing a typo'd IP re-asked the
+# gateway - and ENTER there accepts the newly DERIVED gateway, silently
+# discarding a custom one the operator had entered earlier.
+isset ${editing} && goto commit ||
 goto ask_gw
 
 :ip_bad
@@ -424,6 +430,8 @@ goto launch
 :casper_fallback
 isset ${casper_retry} && goto boot_fail ||
 set casper_retry 1
+# Drop anything the failed fetch left registered before re-using the name.
+imgfree kboot ||
 set kbase http://old-releases.ubuntu.com/releases/${rel${rtag}}/netboot/amd64
 set kurl https://old-releases.ubuntu.com/releases/${rel${rtag}}/ubuntu-${rel${rtag}}-live-server-amd64.iso
 goto casper_try
@@ -511,6 +519,7 @@ goto launch
 # the next one, and the iseq guards stop a host being retried against itself.
 :di_fallback
 isset ${di_hop2} && goto boot_fail ||
+imgfree kboot ||
 isset ${di_hop1} && goto di_hop_two ||
 set di_hop1 1
 iseq ${di_host} ${di_alt} && goto di_hop_two ||
@@ -611,12 +620,20 @@ initrd --name iboot ${iurl} || goto boot_fail
 set got_i 1
 boot || goto boot_fail
 
-# Release whatever the failed attempt already pulled down so the next try
-# starts clean. A flag marks each image that actually loaded; freeing purely by
-# name would flood the console with "no such image" for every one that didn't.
+# Release whatever the failed attempt pulled down, so the next try starts
+# clean. This is UNCONDITIONAL on purpose. `kernel --name kboot <url>`
+# registers the image the moment the DOWNLOAD succeeds (usr/imgmgmt.c) and
+# core/image.c deliberately ignores a failed type probe - so a fetch that
+# returned a captive-portal page, a truncated file or an HTML error body
+# leaves a registered `kboot` behind even though the command reported
+# failure. iPXE then splices every still-registered image into the initrd
+# chain of the NEXT boot: "Initramfs unpacking failed: invalid magic",
+# followed by a root-device panic, on an entry that is itself fine.
+# Gating on got_k/got_i missed exactly that case. The trailing `||` swallows
+# the cosmetic "no such image" when there was nothing to free.
 :boot_fail
-isset ${got_k} && imgfree kboot ||
-isset ${got_i} && imgfree iboot ||
+imgfree kboot ||
+imgfree iboot ||
 clear got_k
 clear got_i
 echo
