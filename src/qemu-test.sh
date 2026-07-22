@@ -1,75 +1,157 @@
 #!/bin/bash
-# Smoke-test FluxBilling ISO in QEMU (BIOS serial console).
-# Walks all prompts, accepts the review screen, verifies the OS menu shows
-# the new entries + install-mode toggle, flips the toggle to MANUAL and back,
-# then boots the default entry (Ubuntu 26.04) and verifies the boot sequence
-# reaches the network fetch stage with the embedded aux files intact
-# (no "Operation not supported").
-set -x
+# Smoke-test FluxBilling ISO in QEMU - a BIOS (SeaBIOS) pass AND a UEFI (OVMF)
+# pass, both over the serial console. Each pass walks all prompts, accepts the
+# review screen, verifies the OS menu shows the expected entries + the
+# install-mode toggle, flips the toggle to MANUAL and back, then boots the
+# default entry (Ubuntu 26.04) and verifies the boot sequence reaches the
+# network fetch stage with the embedded aux files intact (no "Operation not
+# supported").
+#
+# The menu is DRIVEN BY THE LOG, not by fixed sleeps: each keystroke goes out
+# only after the prompt it answers has actually appeared on the serial line,
+# so a slow TCG host (CI, or qemu-under-Rosetta) shifts timing without
+# breaking the walk.
+#
+# EXIT CODE IS REAL: any MISS, timeout or forbidden line -> exit 1. CI gates
+# on it (.github/workflows/build-test.yml).
+set -uo pipefail
+# QEMU can exit mid-walk (crash, or the timeout firing). Without this the next
+# write into the fifo delivers SIGPIPE, bash dies with 141, and NO checks are
+# printed and the second pass never runs - a real failure would look like an
+# infrastructure hiccup.
+trap '' PIPE
 
-feed() {
-  sleep 14                 # isolinux + ipxe init + banner + ifstat
-  printf '0\r'; sleep 3    # interface number
-  printf '10.0.2.15/27\r'; sleep 2   # IP/prefix combined
-  printf '\r'; sleep 2     # gateway (accept auto-calculated)
-  printf 'srv1\r'; sleep 2  # hostname
-  printf '\t'; sleep 2     # login: TAB to password field
-  printf 'Passw0rd123\r'; sleep 4         # login: password (hidden) + submit
-  printf '\r'; sleep 3     # review menu: Continue to OS selection
-  printf '\033[A'; sleep 1 # up from default (u2604) to the mode toggle
-  printf '\r'; sleep 3     # toggle -> MANUAL, menu redraws at default
-  printf '\033[A'; sleep 1 # up to the toggle again
-  printf '\r'; sleep 3     # toggle -> AUTOMATED, menu redraws at default
-  printf '\r'; sleep 170   # OS menu: Ubuntu 26.04 (default) -> fetch + kernel
-}
+ISO=${ISO:-/iso/FluxBilling-OS-Installer_v1.0.iso}
+LOGDIR=${LOGDIR:-/tmp}; mkdir -p "$LOGDIR"
+[ -s "$ISO" ] || { echo "FATAL: ISO not found or empty: $ISO"; exit 1; }
+fail=0
 
-echo "===== BIOS TEST ====="
-feed | timeout 330 qemu-system-x86_64 -m 4096 -cdrom /iso/FluxBilling-OS-Installer_v1.0.iso \
-  -nographic -boot d 2>&1 | tee /tmp/bios.log | tail -40
-
-# iPXE output reaches the serial line TWICE under QEMU -nographic (native
-# serial console + BIOS int10 redirect), interleaved char-by-char with a
-# small lag - literal greps never match. Match fuzzily instead: allow up to
-# 3 interleaved characters between every expected character.
+# iPXE output reaches the serial line TWICE under QEMU -nographic on BIOS
+# (native serial console + BIOS int10 redirect), interleaved char-by-char
+# with a small lag - literal greps never match. Match fuzzily instead: allow
+# up to 3 interleaved characters between every expected character.
+ESC=$(printf '')
 fz() {
-  local s=$1 out="" c i
+  local s=$1 out="" c i gap
+  # Between two expected characters allow up to 6 "units", each either a whole
+  # ANSI escape sequence or one stray character. BOTH are needed: iPXE output
+  # reaches the serial line twice under -nographic (native console + BIOS
+  # int10 redirect) and interleaves char by char, AND the menu colours every
+  # label, so e.g. "Gateway[0m [37m[ENTER" puts 10 bytes between the
+  # "y" and the "[" - a plain .{0,3} gap could never match it, which is
+  # exactly how the first rewrite of this script stalled at the gateway
+  # prompt while reporting nothing but a timeout.
+  gap="(${ESC}\[[0-9;?]*[a-zA-Z]|.){0,6}"
   for ((i = 0; i < ${#s}; i++)); do
     c=${s:i:1}
-    case $c in [\[\]\(\).*+?^\$\\/]) c="\\$c" ;; esac
-    out+="$c.{0,3}"
+    case $c in [\[\]\(\).*+?^\$\/]) c="\$c" ;; esac
+    out+="$c$gap"
   done
   printf '%s' "$out"
 }
-chk() {
-  grep -aqE "$(fz "$1")" /tmp/bios.log && echo "OK   $1" || echo "MISS $1"
+
+# wait_for <log> <string> <timeout_s>: poll until the string (fuzzy) shows up.
+wait_for() {
+  local log=$1 s=$2 t=$3 i=0
+  while [ "$i" -lt "$t" ]; do
+    grep -aqE "$(fz "$s")" "$log" && return 0
+    sleep 1; i=$((i + 1))
+  done
+  echo "FAIL TIMEOUT(${t}s) waiting for: $s"
+  fail=1
+  return 1
 }
 
-echo "===== BIOS CHECKS ====="
-chk "FluxBilling.app"
-chk "Port number"
-chk "IP / subnet"
-chk "Gateway [ENTER"
-chk "Review your setup"
-chk "Install mode"
-chk "MANUAL"
-chk "AUTOMATED"
-chk "Ubuntu 26.04 LTS"
-chk "Ubuntu 24.04 LTS"
-chk "AlmaLinux 9"
-chk "Rocky Linux 9"
-chk "CentOS Stream 9"
-# 26.04 (the default entry) now boots Canonical's own netboot images.
-chk "releases.ubuntu.com"
-chk "netboot/amd64/linux"
-# (openSUSE/Other section sits below the ~18-row menu viewport on the 80x24
-#  serial console - never drawn unless scrolled, so not display-checked)
-echo "must be 0 -> not-supported: $(grep -acE "$(fz 'Operation not supported')" /tmp/bios.log)"
-echo "must be 0 -> could-not-start: $(grep -acE "$(fz 'Could not start download')" /tmp/bios.log)"
-# Kernel messages arrive on ttyS0 as a single clean stream (only iPXE/BIOS
-# output is doubled), so these grep literally. They catch the class of bug
-# where an EMBED-ded image reaches the initrd chain without a cpio path and
-# gets spliced in verbatim - the whole chain then fails to unpack.
-echo "must be 0 -> unpack-failed: $(grep -ac 'Initramfs unpacking failed' /tmp/bios.log)"
-echo "must be 0 -> kernel-panic: $(grep -ac 'Kernel panic' /tmp/bios.log)"
-# (iPXE-side line, so fuzzy-matched like the chk strings above)
-echo "must be 0 -> console-cmd-missing: $(grep -acE "$(fz 'console: command not found')" /tmp/bios.log)"
+chk() {
+  grep -aqE "$(fz "$1")" "$2" && echo "OK   $1" || { echo "MISS $1"; fail=1; }
+}
+must_zero() { # <label> <pattern> <log> [fuzzy]
+  local n
+  if [ "${4:-}" = fuzzy ]; then n=$(grep -acE "$(fz "$2")" "$3"); else n=$(grep -ac "$2" "$3"); fi
+  [ "$n" -eq 0 ] && echo "OK   zero $1" || { echo "FAIL $1: $n hits"; fail=1; }
+}
+
+run_pass() { # <label> <extra qemu args...>
+  local label=$1; shift
+  local log=$LOGDIR/$label.log fifo=/tmp/$label.fifo qpid
+  rm -f "$log" "$fifo"; mkfifo "$fifo"; : > "$log"
+  echo "===== ${label^^} PASS ====="
+  # accel=kvm:tcg - KVM when the container gets /dev/kvm (CI), TCG otherwise.
+  timeout 900 qemu-system-x86_64 -machine accel=kvm:tcg -m 4096 -cdrom "$ISO" -nographic -boot d "$@" \
+    < "$fifo" > "$log" 2>&1 &
+  qpid=$!
+  exec 3> "$fifo"                       # keep the writer open across sends
+  send() { printf "$1" >&3 2>/dev/null || true; }
+
+  wait_for "$log" "Port number" 300     && send '0\r'
+  wait_for "$log" "IP / subnet" 90      && send '10.0.2.15/27\r'
+  wait_for "$log" "Gateway" 90          && send '\r'
+  wait_for "$log" "Hostname" 90         && send 'srv1\r'
+  wait_for "$log" "Root password" 90    && { sleep 1; send '\t'; sleep 1; send 'Passw0rd123\r'; }
+  wait_for "$log" "Review your setup" 90 && send '\r'
+  if wait_for "$log" "Install mode" 90; then
+    sleep 2; send '\033[A'; sleep 1; send '\r'      # toggle -> MANUAL
+    wait_for "$log" "MANUAL" 60
+    sleep 2; send '\033[A'; sleep 1; send '\r'      # toggle -> AUTOMATED
+    sleep 3; send '\r'                              # boot default (Ubuntu 26.04)
+    # 26.04 boots Canonical's own netboot images - the URL prints as the
+    # fetch starts.
+    wait_for "$log" "netboot/amd64/linux" 300
+    sleep 20                                        # let the kernel start (or panic)
+  fi
+  exec 3>&-
+  kill "$qpid" 2>/dev/null; wait "$qpid" 2>/dev/null
+  rm -f "$fifo"
+
+  echo "===== ${label^^} CHECKS ====="
+  chk "FluxBilling.app"    "$log"
+  chk "Port number"        "$log"
+  chk "IP / subnet"        "$log"
+  chk "Gateway [ENTER"     "$log"
+  chk "Review your setup"  "$log"
+  chk "Install mode"       "$log"
+  chk "MANUAL"             "$log"
+  chk "AUTOMATED"          "$log"
+  chk "Ubuntu 26.04 LTS"   "$log"
+  chk "Ubuntu 24.04 LTS"   "$log"
+  chk "AlmaLinux 9"        "$log"
+  chk "Rocky Linux 9"      "$log"
+  chk "CentOS Stream 9"    "$log"
+  chk "releases.ubuntu.com" "$log"
+  chk "netboot/amd64/linux" "$log"
+  # (openSUSE/Other section sits below the ~18-row menu viewport on the 80x24
+  #  serial console - never drawn unless scrolled, so not display-checked)
+  must_zero "not-supported"       'Operation not supported'      "$log" fuzzy
+  must_zero "could-not-start"     'Could not start download'     "$log" fuzzy
+  # Kernel messages arrive on ttyS0 as a single clean stream (only iPXE/BIOS
+  # output is doubled), so these grep literally. They catch the class of bug
+  # where an EMBED-ded image reaches the initrd chain without a cpio path and
+  # gets spliced in verbatim - the whole chain then fails to unpack.
+  must_zero "unpack-failed"       'Initramfs unpacking failed'   "$log"
+  must_zero "kernel-panic"        'Kernel panic'                 "$log"
+  must_zero "console-cmd-missing" 'console: command not found'   "$log" fuzzy
+}
+
+run_pass bios
+
+# UEFI: the shipped ISO carries bin-x86_64-efi/ipxe.efi as its El Torito EFI
+# image - the half of the product the old test never booted, and exactly the
+# regression class the iPXE commit pin exists for (master broke EFI El Torito
+# under OVMF; see builder.Dockerfile).
+OVMF=""
+for f in /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd; do
+  [ -e "$f" ] && { OVMF=$f; break; }
+done
+if [ -n "$OVMF" ]; then
+  VARS=${OVMF/CODE/VARS}
+  cp "$VARS" /tmp/ovmf-vars.fd
+  run_pass uefi \
+    -drive if=pflash,format=raw,readonly=on,file="$OVMF" \
+    -drive if=pflash,format=raw,file=/tmp/ovmf-vars.fd
+else
+  echo "FAIL no OVMF firmware found - UEFI pass cannot run"
+  fail=1
+fi
+
+echo "===== RESULT: $([ "$fail" -eq 0 ] && echo PASS || echo FAIL) ====="
+exit "$fail"

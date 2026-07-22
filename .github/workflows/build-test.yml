@@ -1,0 +1,56 @@
+# Build the ISO and boot-test it on every push and PR.
+#
+# Catches the regression classes the local tests were built for - menu
+# breakage, EMBED list drift, "Operation not supported" on embedded files,
+# initrd injection loss, EFI El Torito breakage - without anyone having to
+# remember to run them by hand. Both test scripts exit nonzero on any miss,
+# so the job genuinely gates.
+#
+# The builder-image build (~10 min) runs on every job; it is the price of a
+# clean-room build. GitHub Linux runners expose /dev/kvm, so the QEMU passes
+# run KVM-accelerated (the scripts fall back to TCG elsewhere).
+
+name: build-test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-boot-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the ISO (clean clone, exactly like a user would)
+        run: ./build.sh
+
+      - name: Consistency - watchdog URL list generates from the menu
+        run: ./src/menu-urls.sh > /dev/null
+
+      - name: BIOS + UEFI boot smoke test
+        run: |
+          docker run --rm --platform linux/amd64 \
+            $( [ -e /dev/kvm ] && echo --device /dev/kvm ) \
+            -v "$PWD":/w -e ISO=/w/FluxBilling-OS-Installer_v1.0.iso -e LOGDIR=/w/test-logs \
+            fluxbilling-builder bash /w/src/qemu-test.sh
+
+      - name: E2E initrd-injection + kernel-exec test
+        run: |
+          docker run --rm --platform linux/amd64 \
+            $( [ -e /dev/kvm ] && echo --device /dev/kvm ) \
+            -v "$PWD":/w -e LOGDIR=/w/test-logs \
+            fluxbilling-builder bash /w/src/e2e-test.sh
+
+      - name: Upload serial logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-serial-logs
+          path: test-logs/
+          if-no-files-found: ignore
