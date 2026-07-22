@@ -35,11 +35,16 @@ fz() {
   printf '%s' "$out"
 }
 
-# build_iso <out.iso> <sed-expr...> - embed a patched menu, everything else stock
+# build_iso <out.iso> <marker> <sed-expr...> - embed a patched menu, rest stock
 build_iso() {
-  local out=$1; shift
+  local out=$1 marker=$2; shift 2
   local menu=/work/fb-menu.ipxe
   sed "$@" "$MENU" > "$menu"
+  # A sed expression that matches NOTHING exits 0 and copies the menu through
+  # unchanged - the test would then boot a stock ISO, watch it succeed against
+  # the real mirror, and never reach the fallback it exists to prove. Assert
+  # the patch landed, exactly as e2e-test.sh does.
+  grep -q "$marker" "$menu" || { echo "FATAL: sed did not apply (no '$marker' in patched menu)"; return 1; }
   python3 /w/src/logo-compose.py /w/assets/FluxBilling.png /work/logo.png
   cp /w/src/preseed.cfg /w/src/99fluxseed /w/src/param.conf /w/src/ks.cfg \
      /w/src/autoinst.xml /w/src/50-flux-agama.sh /w/src/flux-scrub \
@@ -55,7 +60,7 @@ build_iso() {
 # walk <iso> <log> <rows-below-default> <expected-url-substring> <label>
 walk() {
   local iso=$1 log=$2 rows=$3 want=$4 label=$5
-  local fifo=/tmp/fb.fifo qpid i=0
+  local fifo=/tmp/fb.fifo qpid i=0 rc=0
   rm -f "$fifo" "$log"; mkfifo "$fifo"; : > "$log"
   timeout 600 qemu-system-x86_64 -machine accel=kvm:tcg -m 2048 \
     -cdrom "$iso" -nographic -boot d < "$fifo" > "$log" 2>&1 &
@@ -69,11 +74,11 @@ walk() {
   w() {
     local j=0
     while [ $j -lt "$2" ]; do
-      [ -e "$log" ] || { echo "FAIL $label: log $log disappeared mid-run"; fail=1; return 1; }
+      [ -e "$log" ] || { echo "FAIL $label: log $log disappeared mid-run"; fail=1; rc=1; return 1; }
       grep -aqE "$(fz "$1")" "$log" && return 0
       sleep 1; j=$((j+1))
     done
-    echo "FAIL $label: timeout waiting for '$1'"; fail=1; return 1
+    echo "FAIL $label: timeout waiting for '$1'"; fail=1; rc=1; return 1
   }
   s() { printf "$1" >&3 2>/dev/null || true; }
 
@@ -98,30 +103,38 @@ walk() {
     echo "OK   $label: fell back to $want"
   else
     echo "FAIL $label: never reached $want"
-    fail=1
+    fail=1; rc=1
   fi
   sleep 3
   exec 3>&-; kill "$qpid" 2>/dev/null; wait "$qpid" 2>/dev/null
   rm -f "$fifo"
-  # Report this case's own verdict too, so the caller's || chain is a second
-  # line of defence rather than the only one.
-  [ "$fail" -eq 0 ]
+  # This case's OWN verdict - `fail` is a monotonic global, so returning it
+  # would mark every later case failed once any earlier one did.
+  return "$rc"
 }
 
 REL2604=$(sed -n 's/^set rel2604 //p' "$MENU")
 [ -n "$REL2604" ] || { echo "FATAL: no rel2604 in menu"; exit 1; }
 
 echo "===== CASE 1: casper primary dead -> old-releases ====="
-build_iso /work/fb-casper.iso -e "s|^set boot2604 .*|set boot2604 http://127.0.0.1:1/dead|" \
+build_iso /work/fb-casper.iso "set boot2604 http://127.0.0.1:1/dead" -e "s|^set boot2604 .*|set boot2604 http://127.0.0.1:1/dead|" \
   && walk /work/fb-casper.iso "$LOGDIR/fallback-casper.log" 0 \
        "old-releases.ubuntu.com/releases/${REL2604}/netboot/amd64/linux" "casper" \
   || fail=1
 
 echo "===== CASE 2: Debian primary dead -> archive.debian.org ====="
-# Debian 12 sits 7 rows below the default (26.04) in the OS menu:
-# 2604,2510,2404,2204,2004,1804,deb13,deb12 - seven Downs from the default.
-build_iso /work/fb-deb.iso -e "s|^set deb12_host .*|set deb12_host 127.0.0.1:1|" \
-  && walk /work/fb-deb.iso "$LOGDIR/fallback-debian.log" 7 \
+# Derive the row offset from the menu. Hardcoding it means the next release
+# added above deb12 silently retargets the walk at a different entry, and the
+# test then "fails" for a reason that has nothing to do with the fallback.
+DEF=$(sed -n 's/^choose --default \([a-z0-9]*\) .*/\1/p' "$MENU" | head -n1)
+[ -n "$DEF" ] || { echo "FATAL: no 'choose --default' in menu"; exit 1; }
+ROWS=$(awk -v def="$DEF" -v tgt=deb12 '
+  /^item /{ n++; if ($2 == def) d = n; if ($2 == tgt) t = n }
+  END { if (d && t) print t - d; else print "" }' "$MENU")
+[ -n "$ROWS" ] && [ "$ROWS" -gt 0 ] || { echo "FATAL: cannot locate deb12 below $DEF"; exit 1; }
+echo "deb12 is $ROWS rows below the default ($DEF)"
+build_iso /work/fb-deb.iso "set deb12_host 127.0.0.1:1" -e "s|^set deb12_host .*|set deb12_host 127.0.0.1:1|" \
+  && walk /work/fb-deb.iso "$LOGDIR/fallback-debian.log" "$ROWS" \
        "archive.debian.org/debian/dists/bookworm" "debian" \
   || fail=1
 

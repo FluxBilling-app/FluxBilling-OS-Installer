@@ -219,11 +219,15 @@ fluxcidr ${cidr_in} || goto ip_bad
 set ip ${fluxip}
 set nm ${fluxmask}
 set plen ${fluxprefix}
-# Every other prompt returns straight to the review screen when editing; this
-# one used to fall through to :ask_gw, so fixing a typo'd IP re-asked the
-# gateway - and ENTER there accepts the newly DERIVED gateway, silently
-# discarding a custom one the operator had entered earlier.
-isset ${editing} && goto commit ||
+# Returning to the review screen after an IP edit is only safe when the
+# gateway still belongs to the new address's subnet. gw_auto records the
+# gateway fluxcidr derived at the moment gwip was last confirmed, so:
+#   same derived gateway -> same subnet -> keep gwip (which may be a custom
+#     one the operator typed) and go straight back to review;
+#   different -> the corrected address moved subnet, so ask again with the
+#     new default, or :commit would write a gateway unreachable from it.
+isset ${editing} || goto ask_gw
+iseq ${fluxgw} ${gw_auto} && goto commit ||
 goto ask_gw
 
 :ip_bad
@@ -236,6 +240,8 @@ goto ask_ip
 echo
 echo -n   ${ink}Gateway${rst} ${meta}[ENTER = ${fluxgw}]:${rst} ${} && read gwip
 isset ${gwip} || set gwip ${fluxgw}
+# Remember which subnet this gateway was chosen for - see :ask_ip.
+set gw_auto ${fluxgw}
 isset ${editing} && goto commit ||
 goto ask_host
 
@@ -612,10 +618,11 @@ goto launch
 goto review
 
 # Shared success tail for every Linux family: the kernel is already loaded, so
-# flag it (got_k) for :boot_fail cleanup, pull the initrd named in ${iurl},
-# flag that too (got_i), and hand control to the kernel.
+# pull the initrd named in ${iurl}, flag it (got_i) so :boot_fail knows an
+# initrd image exists to free, and hand control to the kernel. There is no
+# matching flag for the kernel: :boot_fail frees kboot unconditionally,
+# because a fetch can leave an image registered even when the command failed.
 :launch
-set got_k 1
 initrd --name iboot ${iurl} || goto boot_fail
 set got_i 1
 boot || goto boot_fail
@@ -629,12 +636,17 @@ boot || goto boot_fail
 # failure. iPXE then splices every still-registered image into the initrd
 # chain of the NEXT boot: "Initramfs unpacking failed: invalid magic",
 # followed by a root-device panic, on an entry that is itself fine.
-# Gating on got_k/got_i missed exactly that case. The trailing `||` swallows
-# the cosmetic "no such image" when there was nothing to free.
+# Gating on got_k missed exactly that case.
+#
+# iboot is DIFFERENT and keeps its flag: `initrd` only ever runs after the
+# kernel loaded, and got_i is set immediately after it returns, so the flag
+# provably tracks whether an initrd exists. Freeing it unconditionally would
+# print a second "no such image" line above the branded failure banner on
+# every kernel-stage failure - the trailing `||` swallows the exit status,
+# not the message.
 :boot_fail
 imgfree kboot ||
-imgfree iboot ||
-clear got_k
+isset ${got_i} && imgfree iboot ||
 clear got_i
 echo
 echo   ${acc}!${rst} ${err}Boot failed.${rst}${meta} Check settings, network, and mirror availability.${rst}

@@ -71,8 +71,13 @@ if [ "$DRY" = 0 ]; then
   done
 fi
 
-mkdir -p "$OUT"
-: > "$OUT/SHA256SUMS"
+# Inside the guard: --dry-run only prints the manifest, and the watchdog runs
+# it weekly. Truncating SHA256SUMS there would wipe the checksum list of a
+# staged release - the very baseline the drift check compares against.
+if [ "$DRY" = 0 ]; then
+  mkdir -p "$OUT"
+  : > "$OUT/SHA256SUMS"
+fi
 
 sign() {
   # iPXE verifies a detached CMS SignedData in DER form (crypto/cms.c).

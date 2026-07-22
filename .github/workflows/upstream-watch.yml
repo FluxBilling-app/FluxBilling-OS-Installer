@@ -248,7 +248,12 @@ jobs:
           existing=$(gh issue list --state open --search "$TITLE in:title" \
                        --json number,title \
                        --jq "[.[] | select(.title == \"$TITLE\")] | .[0].number // empty")
-          if [ -n "$existing" ]; then
+          if [ -n "$existing" ] && [ ! -f ipxe.md ]; then
+            # The watchdog itself broke before the probes ran, so body.md has
+            # no findings in it. Comment - never REPLACE a body that may hold
+            # a real, still-current outage report.
+            gh issue comment "$existing" --body-file body.md
+          elif [ -n "$existing" ]; then
             gh issue edit "$existing" --body-file body.md
             gh issue comment "$existing" \
               --body "Still failing as of $(date -u +%Y-%m-%d). Details updated in the issue body."
@@ -296,11 +301,17 @@ jobs:
         run: |
           set -euo pipefail
           # LTS series only - interim releases never get point releases.
-          # 22.04 is EXCLUDED until the first signed boot-* release replaces
-          # the netbootxyz kernel pin: bumping rel2204 would move the ISO to
-          # the new point release while boot2204 keeps serving the old
-          # kernel - a skew the current pin cannot express.
-          for series in 24.04 26.04; do
+          # Derived from the menu, not hardcoded: a release added to
+          # fluxbilling.ipxe must not silently go untracked here.
+          #   22.04 - netbootxyz kernel pin; bumping rel2204 would move the
+          #           ISO while boot2204 keeps serving the old kernel.
+          #   interim releases (a bare X.10 / non-LTS) never get point releases.
+          skip_series='22.04 25.10'
+          series_list=$(sed -n 's/^set rel\([0-9]\{4\}\) .*/\1/p' fluxbilling.ipxe \
+            | sed -E 's/^([0-9]{2})([0-9]{2})$/\1.\2/')
+          [ -n "$series_list" ] || { echo "::error::no rel* pins found in fluxbilling.ipxe"; exit 1; }
+          for series in $series_list; do
+            case " $skip_series " in *" $series "*) echo "skipping $series"; continue ;; esac
             var="rel$(echo "$series" | tr -d .)"
             have=$(sed -n "s/^set $var //p" fluxbilling.ipxe)
             [ -n "$have" ] || { echo "::error::no $var in fluxbilling.ipxe"; exit 1; }
@@ -326,9 +337,16 @@ jobs:
             # window, not a hypothetical one.
             skip=0
             for f in linux initrd; do
-              curl -fsI --max-time 60 "http://releases.ubuntu.com/$latest/netboot/amd64/$f" > /dev/null || {
-                echo "::warning::$series $latest has no netboot/amd64/$f yet - deferring the bump"
-                skip=1; break; }
+              # Assert the FINAL status. `-f` only fails on >=400, so without
+              # -L a 301/302 exits 0 and the tree is reported published when
+              # curl never saw what was behind the redirect.
+              code=$(curl -sIL -o /dev/null -w '%{http_code}' --max-time 60 \
+                       "http://releases.ubuntu.com/$latest/netboot/amd64/$f")
+              case "$code" in
+                200|206) ;;
+                *) echo "::warning::$series $latest netboot/amd64/$f is $code - deferring the bump"
+                   skip=1; break ;;
+              esac
             done
             [ "$skip" = 1 ] && continue
 

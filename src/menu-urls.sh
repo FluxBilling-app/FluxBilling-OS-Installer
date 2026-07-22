@@ -30,6 +30,20 @@ MENU=fluxbilling.ipxe
 
 die() { echo "menu-urls: $*" >&2; exit 1; }
 
+# Every URL leaves through here. A menu typo, or a nested ${var} this script
+# does not know how to resolve, would otherwise be emitted verbatim - the
+# watchdog then probes a literal "${rel2604}" and blames the mirror for the
+# 404. Silently emitting a bogus URL is the same class of lie as emitting a
+# short list.
+emit() { # emit <tag> <url>
+  case $2 in
+    *'${'*) die "unresolved variable reference in: $2" ;;
+    *://*) ;;
+    *) die "not an absolute URL: $2" ;;
+  esac
+  printf '%s %s\n' "$1" "$2"
+}
+
 getvar() { # getvar <name> -> value of `set <name> ...`, must exist
   local v
   v=$(sed -n "s/^set $1 //p" "$MENU" | head -n1)
@@ -52,21 +66,17 @@ for tag in $casper_rels; do
   # boot* is written in terms of ${relNNNN}; resolve that one nested reference
   # rather than reconstructing the URL from an assumed host.
   boot=${boot//\$\{rel$tag\}/$rel}
-  case "$boot" in
-    *://*) ;;
-    *) die "boot$tag is not an absolute URL: $boot" ;;
-  esac
   # Canonical's netboot tree calls the kernel "linux"; the 22.04 GitHub build
   # calls it "vmlinuz" (see :ubu2204 / :boot_casper).
   case "$boot" in
     *github.com/*) kname=vmlinuz ;;
     *) kname=linux ;;
   esac
-  echo "ipxe $boot/$kname"
-  echo "ipxe $boot/initrd"
-  echo "bulk https://releases.ubuntu.com/$rel/ubuntu-$rel-live-server-amd64.iso"
+  emit ipxe "$boot/$kname"
+  emit ipxe "$boot/initrd"
+  emit bulk "https://releases.ubuntu.com/$rel/ubuntu-$rel-live-server-amd64.iso"
   # :casper_fallback's target for this release - diagnostic, see the header.
-  echo "alt http://old-releases.ubuntu.com/releases/$rel/netboot/amd64/$kname"
+  emit alt "http://old-releases.ubuntu.com/releases/$rel/netboot/amd64/$kname"
   n_cas=$((n_cas + 1))
 done
 # Every casper release must have a matching :ubu<tag> menu entry, and vice
@@ -100,9 +110,9 @@ while read -r blk host path suite alt alt2; do
            alt=$deb_alt; alt2=$deb_alt ;;
   esac
   rel_path=$(printf '%s' "$path" | sed 's|/main/installer-amd64/.*||')
-  echo "ipxe http://${host}${path}/linux"
-  echo "ipxe http://${host}${path}/initrd.gz"
-  echo "bulk http://${host}${rel_path}/Release"
+  emit ipxe "http://${host}${path}/linux"
+  emit ipxe "http://${host}${path}/initrd.gz"
+  emit bulk "http://${host}${rel_path}/Release"
   # Fallback hosts are emitted as `alt`, NOT as `ipxe`. They are expected to
   # 404 in normal operation - archive.debian.org does not carry a suite until
   # Debian archives it, and old-releases.ubuntu.com does not carry a series
@@ -111,9 +121,9 @@ while read -r blk host path suite alt alt2; do
   # else is already broken, the issue reports whether the recovery leg the
   # menu would fall back to is actually serving. Duplicates (the deliberate
   # alt == alt2 in :deb_di, or shared hosts) collapse in a sort -u.
-  for h in "$alt" "$alt2"; do
+  for h in $(printf '%s\n%s\n' "$alt" "$alt2" | sort -u); do
     [ "$h" = "$host" ] && continue
-    echo "alt http://${h}${path}/linux"
+    emit alt "http://${h}${path}/linux"
   done
   n_di=$((n_di + 1))
 done < <(awk '
@@ -141,11 +151,11 @@ while read -r var ver target; do
     boot_ks)       sch=http ;;
     *) die "unexpected goto target '$target' after set ks_base ${var}/${ver}" ;;
   esac
-  echo "ipxe $sch://$base/images/pxeboot/vmlinuz"
-  echo "ipxe $sch://$base/images/pxeboot/initrd.img"
-  echo "bulk https://$base/repodata/repomd.xml"
+  emit ipxe "$sch://$base/images/pxeboot/vmlinuz"
+  emit ipxe "$sch://$base/images/pxeboot/initrd.img"
+  emit bulk "https://$base/repodata/repomd.xml"
   # ks.cfg adds the AppStream repo from fluxrepo= - watch it too
-  echo "bulk https://$host/$ver/AppStream/x86_64/os/repodata/repomd.xml"
+  emit bulk "https://$host/$ver/AppStream/x86_64/os/repodata/repomd.xml"
   n_ks=$((n_ks + 1))
 done < <(awk '
   /^set ks_base \$\{[a-z_]*\}\// {
@@ -163,13 +173,13 @@ done < <(awk '
 n_leap=0
 for v in $(sed -n 's/^set leap\([0-9]*\)_url .*/\1/p' "$MENU"); do
   u=$(getvar "leap${v}_url")
-  echo "ipxe http://$u/boot/x86_64/loader/linux"
-  echo "ipxe http://$u/boot/x86_64/loader/initrd"
-  echo "bulk https://$u/repodata/repomd.xml"
+  emit ipxe "http://$u/boot/x86_64/loader/linux"
+  emit ipxe "http://$u/boot/x86_64/loader/initrd"
+  emit bulk "https://$u/repodata/repomd.xml"
   # Only the Agama live entry streams a squashfs; it is the one whose menu
   # entry carries root=live:.
   grep -q "root=live:https://\${leap${v}_url}" "$MENU" \
-    && echo "bulk https://$u/LiveOS/squashfs.img"
+    && emit bulk "https://$u/LiveOS/squashfs.img"
   n_leap=$((n_leap + 1))
 done
 [ "$n_leap" -ge 1 ] || die "no 'set leapN_url' lines found in $MENU"
