@@ -184,10 +184,15 @@ if wait_for "(initramfs)" 300; then
   # line itself would satisfy any grep even when ls listed nothing at all.
   send 'ls /conf/param.conf /scripts/casper-bottom/99fluxseed /flux-preseed.cfg /flux-ks.cfg /flux-autoinst.xml /flux-agama.json /flux-scrub && echo MARK1-OK\n'
   wait_for "MARK1-OK" 30; sleep 3
-  send 'echo MARK2; cat /conf/param.conf\n'
-  wait_for "MARK2" 30; sleep 3
-  send 'echo MARK3; head -3 /scripts/casper-bottom/99fluxseed\n'
-  wait_for "MARK3" 30; sleep 3
+  # Same shape for the content checks: let the GUEST decide and emit a marker.
+  # Scanning a fixed window of console output after an echoed marker cannot
+  # work - the string being looked for may sit further down the file than the
+  # window reaches, which is exactly how this assertion failed while the file
+  # it was checking was present and correct.
+  send 'grep -q 99fluxseed /conf/param.conf && echo MARK2-OK\n'
+  wait_for "MARK2-OK" 30; sleep 3
+  send 'grep -q FluxBilling /scripts/casper-bottom/99fluxseed && echo MARK3-OK\n'
+  wait_for "MARK3-OK" 30; sleep 3
 fi
 exec 3>&-
 kill "$QPID" 2>/dev/null; wait "$QPID" 2>/dev/null
@@ -212,9 +217,9 @@ must_have "initramfs-shell" '(initramfs)'
 must_have "MARK1 all injected files present" 'MARK1-OK'
 grep -aA8 'flux-scrub' "$LOG" | grep -q 'No such file' && { echo "FAIL MARK1: injected file missing"; fail=1; }
 # MARK2: the casper trigger reached /conf/param.conf and calls the seed hook
-grep -aA4 'MARK2' "$LOG" | grep -q '99fluxseed' && echo "OK   MARK2 param.conf content" || { echo "FAIL MARK2: param.conf missing/empty"; fail=1; }
-# MARK3: the seed generator itself survived with its shebang intact
-grep -aA4 'MARK3' "$LOG" | grep -q 'FluxBilling' && echo "OK   MARK3 99fluxseed content" || { echo "FAIL MARK3: 99fluxseed missing/empty"; fail=1; }
+must_have "MARK2 param.conf invokes the seed hook" 'MARK2-OK'
+# MARK3: the seed generator itself survived the initramfs unpack with content
+must_have "MARK3 99fluxseed content intact" 'MARK3-OK'
 
 echo "===== RESULT: $([ "$fail" -eq 0 ] && echo PASS || echo FAIL) ====="
 exit "$fail"
