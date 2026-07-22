@@ -49,6 +49,14 @@ set portal FluxBilling.app
 #   (22.04.5 is the exception: its images still come from a GitHub release,
 #   which publishes https only. See the note by set boot2204.)
 #
+#   Since the TRUST= build change (see build.sh) the binary carries a small
+#   set of public root CAs plus the FluxBilling CA, so the https fetches iPXE
+#   DOES make - the 22.04.5 GitHub release, the version manifest at :commit,
+#   and any mirror that 301s http to https (mirror.stream.centos.org already
+#   redirects the kernel fetch today) - validate properly with NO ca.ipxe.org
+#   round-trip. http:// stays the default for iPXE fetches to keep TLS out of
+#   the boot path where it buys nothing, not because it is unverifiable.
+#
 #   The INSTALLERS - casper, anaconda, linuxrc, dracut - carry a full CA bundle
 #   and validate properly. Everything they pull is https:// below, and that is
 #   the bulk of the bytes: the Ubuntu ISO, the ~800 MB anaconda stage2, the
@@ -86,13 +94,18 @@ set boot2604 http://releases.ubuntu.com/${rel2604}/netboot/amd64
 # TODO: replace with the extracted-and-signed 22.04.5 casper images once the
 # first boot-* release is cut; this is the only non-official source left.
 set boot2204 https://github.com/netbootxyz/ubuntu-squash/releases/download/22.04.5-be230164
-# d-i only: both the iPXE netboot fetch AND the apt mirror d-i is preseeded
-# with. Left http:// on purpose - apt verifies every package against the distro
-# GPG keys regardless of transport, and mirror/protocol=https is not dependable
-# across the 18.04 / Debian 11 installers we still boot.
-set ub_mirror http://archive.ubuntu.com
-# (Debian's mirror host is set per suite down at :deb13/:deb12/:deb11 - an
-#  archived suite moves to a DIFFERENT host, so one shared var cannot cover it.)
+# d-i hosts, one var per Debian suite: the same host serves both the iPXE
+# netboot fetch AND the apt mirror d-i is preseeded with. http on purpose -
+# apt verifies every package against the distro GPG keys regardless of
+# transport, and mirror/protocol=https is not dependable across the 18.04 /
+# Debian 11 installers we still boot. Per-suite because an archived suite
+# moves to a DIFFERENT host on its own schedule: Debian DELETES it from
+# deb.debian.org (buster already 404s) and it survives only on
+# archive.debian.org. :di_fallback retries the archive host automatically at
+# boot; flipping a var here (or via the :commit manifest) makes it permanent.
+set deb13_host deb.debian.org
+set deb12_host deb.debian.org
+set deb11_host deb.debian.org
 # Scheme-less: http:// for the iPXE kernel/initrd fetch, https:// for whatever
 # the installer pulls. See the policy note above.
 set alma_url repo.almalinux.org/almalinux
@@ -246,6 +259,23 @@ set net${nic}/ip ${ip}
 set net${nic}/netmask ${nm}
 set net${nic}/gateway ${gwip}
 set net${nic}/dns ${ns1}
+# ---- boot-time version manifest: self-heal for ISOs already in the field ----
+# The first moment the data NIC is configured. A tiny iPXE script on
+# FluxBilling's own host re-`set`s any of the pins above (rel*, boot*, img*,
+# deb*_host, ...) so an ISO burned to a customer iDRAC keeps booting after a
+# point release supersedes a pin or a suite archives - without a rebuild.
+# Fetched over TLS validated against the root CAs baked in at build time
+# (CERT=/TRUST= in build.sh; includes the FluxBilling CA) - no ca.ipxe.org.
+# A failure costs one error line and at most --timeout, then the embedded
+# values stay authoritative - an offline management network boots as before.
+# --timeout is mandatory: an isolated iDRAC LAN that blackholes packets would
+# otherwise run iPXE's full retry machinery on EVERY boot.
+# The flag latches only on SUCCESS (the && runs just on the success path), so
+# an operator who mistypes the network, fixes it at the review screen and
+# re-enters :commit gets another try - which is the whole point of that
+# screen. Keep the manifest a plain list of `set` lines; list derived vars
+# (img*, boot*) explicitly.
+isset ${flux_manifested} || chain --timeout 5000 --autofree https://boot.fluxbilling.app/flux-versions.ipxe && set flux_manifested 1 ||
 set macid 01-${netX/mac:hexhyp}
 set net_kargs ip=${ip}::${gwip}:${nm}:${hostnm}::none:${ns1}:${ns2} BOOTIF=${macid} hostname=${hostnm}
 set flux_kargs fluxhost=${hostnm} fluxpass=${rootpw} fluxcidr=${plen}
@@ -320,6 +350,11 @@ set ay_auto autoyast=file:///flux-autoinst.xml ${flux_kargs}
 # human can review it); the bare flag was relying on how a valueless option
 # happens to parse. Spell the intent out.
 set ag_auto inst.auto=${agama_url} inst.install=1 inst.finish=reboot ${flux_kargs}
+# live.password is the Agama live-env web-UI login. Automated installs never
+# need it - the profile sets the real credentials - and it is the one
+# cmdline credential no scrub used to reach, so it rides in MANUAL mode only,
+# where the operator logs into https://<ip> with it.
+clear ag_live
 goto kargs_done
 
 :kargs_manual
@@ -331,6 +366,7 @@ clear di_auto
 clear ks_auto
 clear ay_auto
 clear ag_auto
+set ag_live live.password=${rootpw}
 
 :kargs_done
 menu ${app_name} v${app_ver}   ${hostnm}   ${ip}/${plen} gw ${gwip}   ${mode_lbl}
@@ -387,58 +423,94 @@ set kname vmlinuz
 goto boot_casper
 
 :boot_casper
-kernel --name kboot ${boot${rtag}}/${kname} initrd=initrd.magic ${net_kargs} url=${img${rtag}} ${ubu_auto} ${vga_kargs} ${con_kargs} || goto boot_fail
-set iurl ${boot${rtag}}/initrd
+clear casper_retry
+set kbase ${boot${rtag}}
+set kurl ${img${rtag}}
+:casper_try
+kernel --name kboot ${kbase}/${kname} initrd=initrd.magic ${net_kargs} url=${kurl} ${ubu_auto} ${vga_kargs} ${con_kargs} || goto casper_fallback
+set iurl ${kbase}/initrd
 goto launch
 
+# casper self-heal: when a point release is superseded, its directory leaves
+# releases.ubuntu.com and the content survives under
+# old-releases.ubuntu.com/releases/<version>/ - kernel over plain http (no
+# TLS in the iPXE path), ISO over https for casper, which carries a full CA
+# bundle. One retry there, then :boot_fail; loop-safe because the flag is
+# checked before it is set and cleared on every fresh :boot_casper entry.
+# (2204 lands here too if its GitHub pin dies; 22.04 has no netboot tree on
+# old-releases either, so that retry 404s into :boot_fail - same end state
+# as before, one extra fetch.)
+:casper_fallback
+isset ${casper_retry} && goto boot_fail ||
+set casper_retry 1
+set kbase http://old-releases.ubuntu.com/releases/${rel${rtag}}/netboot/amd64
+set kurl https://old-releases.ubuntu.com/releases/${rel${rtag}}/ubuntu-${rel${rtag}}-live-server-amd64.iso
+goto casper_try
+
 # ---- Ubuntu 18/20 and Debian 11/12/13, via the d-i netboot images ----
+# Every entry sets a primary host (di_host), an archive host (di_alt) and a
+# path (di_path); :boot_di fetches from the primary and :di_fallback retries
+# the archive host once when that fails. The SAME host is preseeded as the
+# apt mirror, so a suite booted off the archive host installs from it too -
+# kernel, initrd and packages can never come from mismatched trees.
 :ubu2004
-set di_base ${ub_mirror}/ubuntu/dists/focal-updates/main/installer-amd64/current/legacy-images/netboot/ubuntu-installer/amd64
-goto ubu_di
+set di_host archive.ubuntu.com
+set di_alt old-releases.ubuntu.com
+set di_path /ubuntu/dists/focal-updates/main/installer-amd64/current/legacy-images/netboot/ubuntu-installer/amd64
+set mir_dir /ubuntu
+goto boot_di
 
 :ubu1804
-set di_base ${ub_mirror}/ubuntu/dists/bionic-updates/main/installer-amd64/current/images/netboot/ubuntu-installer/amd64
-goto ubu_di
-
-:ubu_di
-set mir_host archive.ubuntu.com
+set di_host archive.ubuntu.com
+set di_alt old-releases.ubuntu.com
+set di_path /ubuntu/dists/bionic-updates/main/installer-amd64/current/images/netboot/ubuntu-installer/amd64
 set mir_dir /ubuntu
 goto boot_di
 
 # Debian is the ONE family that hard-breaks on its own schedule: once a suite
 # is archived it is DELETED from deb.debian.org (buster already 404s there)
-# and only survives on archive.debian.org, a different host. Nothing can probe
-# for that from here - iPXE has no way to test a URL without downloading it -
-# so each suite carries its own mirror host and archival is a one-line move:
-# set deb_host archive.debian.org for the suite that went away. Ubuntu's
-# releases.ubuntu.com redirects superseded images to old-releases by itself,
-# and Alma/Rocky/CentOS/Leap paths roll forward in place, so only this family
-# needs the manual switch.
+# and only survives on archive.debian.org, a different host. Nothing can
+# PROBE for that from here - iPXE cannot test a URL without downloading it -
+# but :di_fallback turns the resulting fetch failure into one automatic retry
+# against the archive host, so an archived suite keeps installing from ISOs
+# already in the field. Make it permanent (and skip the failed first fetch)
+# by flipping the suite's deb*_host var at the top, or via the :commit
+# manifest. Alma/Rocky/CentOS/Leap paths roll forward in place; Ubuntu casper
+# has its own :casper_fallback.
 :deb13
 set suite trixie
-set deb_host deb.debian.org
+set di_host ${deb13_host}
 goto deb_di
 
 :deb12
 set suite bookworm
-set deb_host deb.debian.org
+set di_host ${deb12_host}
 goto deb_di
 
 :deb11
 set suite bullseye
-set deb_host deb.debian.org
+set di_host ${deb11_host}
 goto deb_di
 
 :deb_di
-set di_base http://${deb_host}/debian/dists/${suite}/main/installer-amd64/current/images/netboot/debian-installer/amd64
-set mir_host ${deb_host}
+set di_alt archive.debian.org
+set di_path /debian/dists/${suite}/main/installer-amd64/current/images/netboot/debian-installer/amd64
 set mir_dir /debian
 goto boot_di
 
 :boot_di
-kernel --name kboot ${di_base}/linux initrd=initrd.magic ${di_net} mirror/country=manual mirror/http/hostname=${mir_host} mirror/http/directory=${mir_dir} mirror/http/proxy= ${di_auto} ${vga_kargs} ${con_kargs} || goto boot_fail
-set iurl ${di_base}/initrd.gz
+kernel --name kboot http://${di_host}${di_path}/linux initrd=initrd.magic ${di_net} mirror/country=manual mirror/http/hostname=${di_host} mirror/http/directory=${mir_dir} mirror/http/proxy= ${di_auto} ${vga_kargs} ${con_kargs} || goto di_fallback
+set iurl http://${di_host}${di_path}/initrd.gz
 goto launch
+
+# d-i self-heal: retry the archive host once. Loop-safe without a flag - once
+# di_host IS the archive host, the equality test sends the next failure to
+# :boot_fail. Also covers archive.ubuntu.com's flaky plain-http spells for
+# the 18.04/20.04 entries (their EOL trees are on old-releases too).
+:di_fallback
+iseq ${di_host} ${di_alt} && goto boot_fail ||
+set di_host ${di_alt}
+goto boot_di
 
 # ---- AlmaLinux / Rocky Linux / CentOS Stream, using anaconda + kickstart ----
 # The ~800 MB stage2 is pulled from inst.repo straight into RAM, so plan on
@@ -470,18 +542,31 @@ goto boot_ks
 
 :cs10
 set ks_base ${centos_url}/10-stream
-goto boot_ks
+goto boot_ks_https
 
 :cs9
 set ks_base ${centos_url}/9-stream
-goto boot_ks
+goto boot_ks_https
+
+# mirror.stream.centos.org 301s every plain-http request to https, so the
+# CentOS entries were already doing TLS - just via a redirect, invisibly, and
+# formerly via ca.ipxe.org. Ask for https up front now that CERT=/TRUST= let
+# iPXE validate it offline: one fewer round-trip at boot, and the watchdog
+# sees a clean 200 instead of a redirect it must special-case. Alma and Rocky
+# serve plain http in place, so they stay http.
+:boot_ks_https
+set ks_sch https
+goto boot_ks_go
 
 :boot_ks
-# ks_base is scheme-less. iPXE pulls vmlinuz/initrd over http; anaconda pulls
-# stage2 + every package over https, and ks.cfg builds the AppStream baseurl
-# from fluxrepo, so that one needs the scheme spelled out too.
-kernel --name kboot http://${ks_base}/BaseOS/x86_64/os/images/pxeboot/vmlinuz initrd=initrd.magic ${net_kargs} inst.repo=https://${ks_base}/BaseOS/x86_64/os/ fluxrepo=https://${ks_base} inst.text ${ks_auto} ${vga_kargs} ${con_kargs} || goto boot_fail
-set iurl http://${ks_base}/BaseOS/x86_64/os/images/pxeboot/initrd.img
+set ks_sch http
+
+:boot_ks_go
+# ks_base is scheme-less. iPXE pulls vmlinuz/initrd over ${ks_sch}; anaconda
+# pulls stage2 + every package over https, and ks.cfg builds the AppStream
+# baseurl from fluxrepo, so that one needs the scheme spelled out too.
+kernel --name kboot ${ks_sch}://${ks_base}/BaseOS/x86_64/os/images/pxeboot/vmlinuz initrd=initrd.magic ${net_kargs} inst.repo=https://${ks_base}/BaseOS/x86_64/os/ fluxrepo=https://${ks_base} inst.text ${ks_auto} ${vga_kargs} ${con_kargs} || goto boot_fail
+set iurl ${ks_sch}://${ks_base}/BaseOS/x86_64/os/images/pxeboot/initrd.img
 goto launch
 
 # ---- openSUSE Leap 15.6 - linuxrc/YaST, AutoYaST read from the injected initrd file ----
@@ -492,12 +577,14 @@ goto launch
 
 # ---- openSUSE Leap 16.0 - the Agama live installer ----
 # The ~400 MB live squashfs streams into RAM across the data NIC. Under
-# autoinstall the agama profile is fetched from ${agama_url} (that's
-# assets/agama-leap16.json - make sure it's hosted there). Manual mode drops
-# you into interactive Agama: a web UI at https://<ip>, log in as root with the
-# password typed into the menu.
+# autoinstall the agama profile is READ FROM THE IMAGE ITSELF: it is embedded
+# as assets/agama-leap16.json, injected into the initrd, and the pre-pivot
+# hook copies it to /run where inst.auto=${agama_url} picks it up - no host
+# serves it. Manual mode drops you into interactive Agama: a web UI at
+# https://<ip>, log in as root with the password typed into the menu
+# (${ag_live} carries it in manual mode ONLY - see the note at :os_pick).
 :leap160
-kernel --name kboot http://${leap160_url}/boot/x86_64/loader/linux initrd=initrd.magic root=live:https://${leap160_url}/LiveOS/squashfs.img rd.neednet=1 ${net_kargs} live.password=${rootpw} ${ag_auto} ${vga_kargs} ${con_kargs} || goto boot_fail
+kernel --name kboot http://${leap160_url}/boot/x86_64/loader/linux initrd=initrd.magic root=live:https://${leap160_url}/LiveOS/squashfs.img rd.neednet=1 ${net_kargs} ${ag_live} ${ag_auto} ${vga_kargs} ${con_kargs} || goto boot_fail
 set iurl http://${leap160_url}/boot/x86_64/loader/initrd
 goto launch
 
