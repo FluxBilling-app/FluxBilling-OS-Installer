@@ -26,29 +26,42 @@ LOGDIR=${LOGDIR:-/tmp}; mkdir -p "$LOGDIR"
 [ -s "$ISO" ] || { echo "FATAL: ISO not found or empty: $ISO"; exit 1; }
 fail=0
 
-# iPXE output reaches the serial line TWICE under QEMU -nographic on BIOS
-# (native serial console + BIOS int10 redirect), interleaved char-by-char
-# with a small lag - literal greps never match. Match fuzzily instead: allow
-# up to 3 interleaved characters between every expected character.
-ESC=$(printf '')
+ESC=$(printf '\033')
+# Build a tolerant ERE for a plain-text phrase. Two things make a literal grep
+# useless here: iPXE output reaches the serial line TWICE under -nographic on
+# BIOS (native serial console + BIOS int10 redirect), interleaved character by
+# character, and the menu colours every label, so a phrase such as
+# "Gateway<ESC>[0m <ESC>[37m[ENTER" carries 10 bytes inside itself. Between two
+# expected characters, allow up to 6 "units", each either a whole ANSI escape
+# sequence or one stray character.
 fz() {
   local s=$1 out="" c i gap
-  # Between two expected characters allow up to 6 "units", each either a whole
-  # ANSI escape sequence or one stray character. BOTH are needed: iPXE output
-  # reaches the serial line twice under -nographic (native console + BIOS
-  # int10 redirect) and interleaves char by char, AND the menu colours every
-  # label, so e.g. "Gateway[0m [37m[ENTER" puts 10 bytes between the
-  # "y" and the "[" - a plain .{0,3} gap could never match it, which is
-  # exactly how the first rewrite of this script stalled at the gateway
-  # prompt while reporting nothing but a timeout.
   gap="(${ESC}\[[0-9;?]*[a-zA-Z]|.){0,6}"
   for ((i = 0; i < ${#s}; i++)); do
     c=${s:i:1}
-    case $c in [\[\]\(\).*+?^\$\/]) c="\$c" ;; esac
+    case $c in [\[\]\(\).*+?^\$\\/]) c="\\$c" ;; esac
     out+="$c$gap"
   done
   printf '%s' "$out"
 }
+
+# Prove the matcher works before trusting it to drive a long boot walk. This
+# is not decoration: an earlier version of fz had its backslash escaping
+# mangled, so every phrase containing "/" or "[" silently stopped matching,
+# and the walk hung at a prompt that was plainly on screen while reporting
+# nothing but a timeout.
+fz_self_test() {
+  local sample p rc=0
+  sample=$(printf 'x\033[1m\033[37mIP / subnet\033[0m \033[37m(e.g. 1.2.3.4/27):\033[0m\ny\033[1mGateway\033[0m \033[37m[ENTER = 1.2.3.1]:\033[0m\n')
+  for p in "IP / subnet" "Gateway [ENTER"; do
+    printf '%s' "$sample" | grep -aqE "$(fz "$p")" || {
+      echo "FATAL: fz self-test cannot match '$p'"; rc=1; }
+  done
+  printf '%s' "$sample" | grep -aqE "$(fz "Port number")" && {
+    echo "FATAL: fz self-test matched a phrase that is not there"; rc=1; }
+  return $rc
+}
+fz_self_test || exit 1
 
 # wait_for <log> <string> <timeout_s>: poll until the string (fuzzy) shows up.
 wait_for() {
