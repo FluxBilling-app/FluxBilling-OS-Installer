@@ -448,21 +448,36 @@ set kurl https://old-releases.ubuntu.com/releases/${rel${rtag}}/ubuntu-${rel${rt
 goto casper_try
 
 # ---- Ubuntu 18/20 and Debian 11/12/13, via the d-i netboot images ----
-# Every entry sets a primary host (di_host), an archive host (di_alt) and a
-# path (di_path); :boot_di fetches from the primary and :di_fallback retries
-# the archive host once when that fails. The SAME host is preseeded as the
-# apt mirror, so a suite booted off the archive host installs from it too -
+# Every entry sets a primary host (di_host), two fallback hosts (di_alt, then
+# di_alt2) and a path (di_path). :boot_di fetches from the current host and
+# :di_fallback walks the alternates on failure. The SAME host is preseeded as
+# the apt mirror, so a suite booted off a fallback installs from it too -
 # kernel, initrd and packages can never come from mismatched trees.
+#
+# The two hops cover different failures. Hop 1 is a country mirror: identical
+# signed content on separate infrastructure, for the case where the primary
+# is simply unreachable (archive.ubuntu.com was timing out on nearly every
+# plain-http request during an audit of this tree, while https to the same
+# host and every other mirror answered). Hop 2 is the archive host, for after
+# the suite goes EOL - old-releases.ubuntu.com/ubuntu/dists/ carries EOL
+# suites in this exact layout; bionic and focal are not there yet only
+# because they are still on ESM.
 :ubu2004
+clear di_hop1
+clear di_hop2
 set di_host archive.ubuntu.com
-set di_alt old-releases.ubuntu.com
+set di_alt us.archive.ubuntu.com
+set di_alt2 old-releases.ubuntu.com
 set di_path /ubuntu/dists/focal-updates/main/installer-amd64/current/legacy-images/netboot/ubuntu-installer/amd64
 set mir_dir /ubuntu
 goto boot_di
 
 :ubu1804
+clear di_hop1
+clear di_hop2
 set di_host archive.ubuntu.com
-set di_alt old-releases.ubuntu.com
+set di_alt us.archive.ubuntu.com
+set di_alt2 old-releases.ubuntu.com
 set di_path /ubuntu/dists/bionic-updates/main/installer-amd64/current/images/netboot/ubuntu-installer/amd64
 set mir_dir /ubuntu
 goto boot_di
@@ -493,7 +508,14 @@ set di_host ${deb11_host}
 goto deb_di
 
 :deb_di
+clear di_hop1
+clear di_hop2
+# Debian has only one alternate - a suite is either live on deb.debian.org or
+# archived on archive.debian.org (verified: buster's netboot images are 404
+# on the former and served on the latter). di_alt2 repeats it so the second
+# hop's equality test ends the walk instead of retrying the same host.
 set di_alt archive.debian.org
+set di_alt2 archive.debian.org
 set di_path /debian/dists/${suite}/main/installer-amd64/current/images/netboot/debian-installer/amd64
 set mir_dir /debian
 goto boot_di
@@ -503,13 +525,21 @@ kernel --name kboot http://${di_host}${di_path}/linux initrd=initrd.magic ${di_n
 set iurl http://${di_host}${di_path}/initrd.gz
 goto launch
 
-# d-i self-heal: retry the archive host once. Loop-safe without a flag - once
-# di_host IS the archive host, the equality test sends the next failure to
-# :boot_fail. Also covers archive.ubuntu.com's flaky plain-http spells for
-# the 18.04/20.04 entries (their EOL trees are on old-releases too).
+# d-i self-heal: walk di_alt, then di_alt2, then give up. The hop flags are
+# cleared at the top of every entry block, so a failed attempt cannot poison
+# the next one, and the iseq guards stop a host being retried against itself.
 :di_fallback
-iseq ${di_host} ${di_alt} && goto boot_fail ||
+isset ${di_hop2} && goto boot_fail ||
+isset ${di_hop1} && goto di_hop_two ||
+set di_hop1 1
+iseq ${di_host} ${di_alt} && goto di_hop_two ||
 set di_host ${di_alt}
+goto boot_di
+
+:di_hop_two
+set di_hop2 1
+iseq ${di_host} ${di_alt2} && goto boot_fail ||
+set di_host ${di_alt2}
 goto boot_di
 
 # ---- AlmaLinux / Rocky Linux / CentOS Stream, using anaconda + kickstart ----
