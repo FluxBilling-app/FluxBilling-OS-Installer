@@ -47,6 +47,16 @@ jobs:
             -v "$PWD":/w -e LOGDIR=/w/test-logs \
             fluxbilling-builder bash /w/src/e2e-test.sh
 
+      - name: Self-heal fallback test (primary host dead)
+        # The fallbacks cannot be reached while the real mirrors are up, which
+        # is exactly when they matter least - so this boots ISOs whose primary
+        # host is a dead address and asserts iPXE moves to the alternate.
+        run: |
+          docker run --rm --platform linux/amd64 \
+            $( [ -e /dev/kvm ] && echo --device /dev/kvm ) \
+            -v "$PWD":/w -e LOGDIR=/w/test-logs \
+            fluxbilling-builder bash /w/src/fallback-test.sh
+
       - name: Upload serial logs
         if: always()
         uses: actions/upload-artifact@v4
