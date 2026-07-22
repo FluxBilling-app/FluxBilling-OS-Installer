@@ -9,14 +9,22 @@ Packages are GPG-verified by APT and DNF. The bulk downloads (Ubuntu ISO,
 anaconda stage2 and repos, Leap squashfs) go over HTTPS and are validated by
 the installers, which carry a full CA bundle.
 
-The kernel and initrd are different. **iPXE** fetches those, and its default
-trust store holds exactly one fingerprint — the iPXE root CA
+The kernel and initrd are different. **iPXE** fetches those, and *stock* iPXE
+holds exactly one trusted fingerprint — the iPXE root CA
 ([`crypto/rootcert.c`][rootcert]). Every public certificate chain therefore
-fails to complete, and iPXE resolves that by downloading a cross-signed
+fails to complete, and stock iPXE resolves that by downloading a cross-signed
 certificate over **plain HTTP** from `ca.ipxe.org` ([`config/crypto.h`][crypto]).
-So switching those URLs to HTTPS buys no verified transport — it only adds a
-third-party dependency that must be reachable from the management network at
-boot time.
+
+`build.sh` now removes that dependency for the HTTPS fetches iPXE does make,
+by passing **both** `CERT=` (the root certificate bodies, into the certstore)
+and `TRUST=` (their fingerprints, as the trust anchors). `TRUST=` alone is a
+trap: it *replaces* the built-in iPXE-root fingerprint while leaving iPXE
+without a copy of any root, so chains still have to be completed over the
+network — worse than before, since the crosscert fallback no longer chains
+either.
+
+That covers transport. It does not cover the plain-HTTP kernel/initrd
+fetches, which no transport trust can protect. For those, verify the payload.
 
 The answer is to stop trusting the transport and verify the payload instead.
 
@@ -73,29 +81,18 @@ Then cut a release on this repo and attach everything in `out/boot-images`
 
 ## Wiring it into the build
 
-Two changes are needed once the first release exists.
+The build side is ALREADY WIRED: `src/builder.Dockerfile` enables
+`IMAGE_TRUST_CMD` (commented out in stock iPXE `config/general.h`, and unlike
+`DIGEST_CMD` *not* stripped again for BIOS builds, so one edit covers both
+targets), and `build.sh` passes `TRUST=` to both `make` invocations — a set
+of public root CAs for the https fetches iPXE makes, plus `certs/flux-ca.crt`
+**whenever it exists** (the public certificate is safe to ship; only the key
+is secret). Generate the keys, rebuild, and the shipped binary trusts your
+CA with no further build change.
 
-**1. `src/builder.Dockerfile`** — enable the trust commands and bake in the CA
-fingerprint. `IMAGE_TRUST_CMD` is commented out in stock iPXE
-(`config/general.h`), and unlike `DIGEST_CMD` it is *not* stripped again for
-BIOS builds, so one edit covers both targets:
+One change remains once the first release exists:
 
-```dockerfile
-RUN cd /ipxe/src && \
-    sed -ri "s|^//(#define[[:space:]]+IMAGE_TRUST_CMD)|\1|" config/general.h && \
-    grep -qE "^#define[[:space:]]+IMAGE_TRUST_CMD" config/general.h
-```
-
-and pass the CA to both `make` invocations in `build.sh`:
-
-```
-make ... EMBED="$EMBEDLIST" TRUST=/work/flux-ca.crt
-```
-
-(copy `certs/flux-ca.crt` into `/work` alongside the embedded payload — the
-public certificate is safe to ship, only the key is secret).
-
-**2. `fluxbilling.ipxe`** — fetch from the release and verify. Every family
+**`fluxbilling.ipxe`** — fetch from the release and verify. Every family
 follows the same shape; the shared `:launch` tail covers the initrd:
 
 ```

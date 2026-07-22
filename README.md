@@ -139,15 +139,22 @@ What is and is not protected, honestly:
 - **Bulk downloads use HTTPS.** The Ubuntu ISO, the anaconda stage2 and
   repos, the Leap live squashfs and `install=` tree are all fetched by the
   installer, which carries a full CA bundle.
-- **Kernel and initrd fetches are plain HTTP and unverified.** iPXE trusts
-  only the iPXE root CA and completes public chains by pulling a cross-signed
-  certificate over plain HTTP from `ca.ipxe.org`, so HTTPS there would add a
-  third-party boot dependency without buying verified transport. Run the
-  installer on a trusted management network.
+- **Kernel and initrd fetches are plain HTTP and unverified** until the first
+  signed `boot-*` release ships. The binary now bakes in a set of public root
+  CAs (`TRUST=` in [build.sh](build.sh)), so the https fetches iPXE does make
+  — the 22.04 GitHub release, the boot-time version manifest, mirrors that
+  redirect http→https — validate with no `ca.ipxe.org` dependency; but the
+  plain-http kernel/initrd fetches still trust the network. Run the installer
+  on a trusted management network, and cut the signed release to close the
+  gap for good.
 - **Credentials never persist in cleartext.** The root password rides the
   kernel command line, so every family creates its accounts locked, sets the
   real password through `chpasswd` (hash only, in `/etc/shadow`), and scrubs
-  `fluxpass=` out of the installer logs on first boot.
+  `fluxpass=` out of the installer logs on first boot. One exception: a
+  **manual** openSUSE Leap 16.0 install also carries `live.password=` (the
+  Agama web-UI login) on the command line, and manual mode runs no profile —
+  so nothing installs the scrub. Clear `/var/log/agama-installation` after a
+  manual Leap 16 install, or use automated mode, which never passes it.
 - **Root SSH with password authentication is enabled** on every family. That
   is a deliberate provisioning convenience — harden it immediately after
   install if the box faces the internet.
@@ -210,8 +217,13 @@ answer files are original work under the same terms.
 
 **No operating system is redistributed here.** Kernels, initrds, install ISOs
 and repositories are fetched at boot, unmodified, from the vendors' own
-mirrors. Answer files are injected into the vendor initrd in RAM, on the
-operator's own machine.
+mirrors — with one exception: the Ubuntu 22.04 kernel/initrd come from a
+[netboot.xyz](https://netboot.xyz) GitHub release, because Canonical never
+published a netboot tree for that series (see the `boot2204` note in
+[fluxbilling.ipxe](fluxbilling.ipxe); the signed `boot-*` release described in
+[docs/SIGNED-BOOT.md](docs/SIGNED-BOOT.md) replaces it with images extracted
+from the official Ubuntu ISO). Answer files are injected into the vendor
+initrd in RAM, on the operator's own machine.
 
 **Trademarks.** Ubuntu is a trademark of Canonical Ltd; Debian of Software in
 the Public Interest, Inc; Red Hat and CentOS of Red Hat, Inc; AlmaLinux of the
