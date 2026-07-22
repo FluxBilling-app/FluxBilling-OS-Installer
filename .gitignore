@@ -8,7 +8,12 @@ __pycache__/
 
 # Boot-image signing. The private keys must NEVER reach the repo - anyone
 # holding flux-ca.key can mint a kernel every FluxBilling installer trusts.
-certs/
+# The CA's PUBLIC certificate is the exception and must be committable:
+# build.sh bakes it into the binary via CERT=/TRUST= only "when it exists", so
+# ignoring the whole directory would mean no clean clone and no CI build could
+# ever produce an ISO that trusts the FluxBilling boot CA.
+certs/*
+!certs/flux-ca.crt
 *.key
 *.pem
 out/

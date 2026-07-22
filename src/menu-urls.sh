@@ -9,6 +9,12 @@
 #                so the watchdog treats any 3xx here as a warning.
 #   bulk <url>   fetched by the installer (casper/anaconda/linuxrc/dracut)
 #                with a full CA bundle - probing with -L matches the client.
+#   alt <url>    a fallback host :casper_fallback / :di_fallback would move to.
+#                DIAGNOSTIC ONLY - these legitimately 404 until the day they
+#                are needed (a suite is not on archive.debian.org until Debian
+#                archives it), so they must never gate the watchdog; they tell
+#                the operator whether the recovery leg is live when something
+#                else has already broken.
 #
 # upstream-watch.yml consumes this instead of carrying its own hand-copied
 # list, and cross-checks the ipxe rows against the sign-boot-images.sh
@@ -32,56 +38,94 @@ getvar() { # getvar <name> -> value of `set <name> ...`, must exist
 }
 
 # --- Ubuntu casper (22.04+) -------------------------------------------------
-rel2204=$(getvar rel2204); rel2404=$(getvar rel2404)
-rel2510=$(getvar rel2510); rel2604=$(getvar rel2604)
-boot2204=$(getvar boot2204)
+# DISCOVER the releases from the menu - never hardcode the list. A hardcoded
+# set silently ignores a newly added entry, and the watchdog would then report
+# full coverage while probing nothing for it. Same reason the counts below are
+# asserted: the release list and the boot* vars must correspond exactly.
+casper_rels=$(sed -n 's/^set rel\([0-9]\{4\}\) .*/\1/p' "$MENU")
+[ -n "$casper_rels" ] || die "no 'set relNNNN' lines found in $MENU"
 
-for rel in "$rel2404" "$rel2510" "$rel2604"; do
-  echo "ipxe http://releases.ubuntu.com/$rel/netboot/amd64/linux"
-  echo "ipxe http://releases.ubuntu.com/$rel/netboot/amd64/initrd"
-done
-# 22.04.5: the third-party GitHub release the menu actually boots today
-# (kernel is named vmlinuz there - see :ubu2204).
-echo "ipxe $boot2204/vmlinuz"
-echo "ipxe $boot2204/initrd"
-for rel in "$rel2204" "$rel2404" "$rel2510" "$rel2604"; do
+n_cas=0
+for tag in $casper_rels; do
+  rel=$(getvar "rel$tag")
+  boot=$(getvar "boot$tag")
+  # boot* is written in terms of ${relNNNN}; resolve that one nested reference
+  # rather than reconstructing the URL from an assumed host.
+  boot=${boot//\$\{rel$tag\}/$rel}
+  case "$boot" in
+    *://*) ;;
+    *) die "boot$tag is not an absolute URL: $boot" ;;
+  esac
+  # Canonical's netboot tree calls the kernel "linux"; the 22.04 GitHub build
+  # calls it "vmlinuz" (see :ubu2204 / :boot_casper).
+  case "$boot" in
+    *github.com/*) kname=vmlinuz ;;
+    *) kname=linux ;;
+  esac
+  echo "ipxe $boot/$kname"
+  echo "ipxe $boot/initrd"
   echo "bulk https://releases.ubuntu.com/$rel/ubuntu-$rel-live-server-amd64.iso"
+  # :casper_fallback's target for this release - diagnostic, see the header.
+  echo "alt http://old-releases.ubuntu.com/releases/$rel/netboot/amd64/$kname"
+  n_cas=$((n_cas + 1))
 done
+# Every casper release must have a matching :ubu<tag> menu entry, and vice
+# versa - otherwise one of the two lists has grown without the other.
+n_items=$(grep -c '^set rtag ' "$MENU")
+[ "$n_cas" = "$n_items" ] || die "found $n_cas casper releases but $n_items 'set rtag' entries"
 
 # --- d-i: Ubuntu 18.04/20.04 + Debian --------------------------------------
 # Each :ubu*/:deb* entry block sets di_host (possibly via a deb*_host var)
 # and di_path (possibly containing ${suite}); walk the blocks and resolve.
-awk '
-  /^:(ubu(2004|1804)|deb[0-9]+)$/ { blk=$0; next }
-  blk && /^set suite /   { suite=$3; next }
-  blk && /^set di_host / { host=$3; next }
-  blk && /^set di_path / { path=$3; next }
-  blk && /^goto /        { print blk, (host?host:"-"), (path?path:"-"), (suite?suite:"-")
-                           blk=host=path=suite="" }
-' "$MENU" > /tmp/di-blocks.$$
 # The Debian blocks jump to :deb_di for their shared di_alt/di_path; fetch
 # that template separately.
 deb_path=$(awk '/^:deb_di$/{f=1} f && /^set di_path /{print $3; exit}' "$MENU")
 [ -n "$deb_path" ] || die "no di_path under :deb_di"
+deb_alt=$(awk '/^:deb_di$/{f=1} f && /^set di_alt /{print $3; exit}' "$MENU")
+[ -n "$deb_alt" ] || die "no di_alt under :deb_di"
 
 n_di=0
-while read -r blk host path suite; do
+# Process substitution, not a temp file: /tmp/<predictable> is a symlink
+# target on any shared machine, and the parsed hostnames feed straight into
+# probed URLs.
+while read -r blk host path suite alt alt2; do
   case "$blk" in
-    :ubu*) [ "$host" != - ] && [ "$path" != - ] || die "incomplete d-i block $blk" ;;
-    :deb*) # host is ${debNN_host} - resolve; path comes from :deb_di
+    :ubu*) [ "$host" != - ] && [ "$path" != - ] || die "incomplete d-i block $blk"
+           [ "$alt" != - ] && [ "$alt2" != - ] || die "no fallback hosts in $blk" ;;
+    :deb*) # host is ${debNN_host} - resolve; path/alt come from :deb_di
            var=${host#\$\{}; var=${var%\}}
            host=$(getvar "$var")
            [ "$suite" != - ] || die "no suite in $blk"
-           path=${deb_path//\$\{suite\}/$suite} ;;
+           path=${deb_path//\$\{suite\}/$suite}
+           alt=$deb_alt; alt2=$deb_alt ;;
   esac
+  rel_path=$(printf '%s' "$path" | sed 's|/main/installer-amd64/.*||')
   echo "ipxe http://${host}${path}/linux"
   echo "ipxe http://${host}${path}/initrd.gz"
-  # apt Release file of the suite d-i is preseeded with, same host
-  rel_path=$(printf '%s' "$path" | sed 's|/main/installer-amd64/.*||')
   echo "bulk http://${host}${rel_path}/Release"
+  # Fallback hosts are emitted as `alt`, NOT as `ipxe`. They are expected to
+  # 404 in normal operation - archive.debian.org does not carry a suite until
+  # Debian archives it, and old-releases.ubuntu.com does not carry a series
+  # while it is still on ESM - so failing on them would file a false alarm
+  # every week. The watchdog probes them for DIAGNOSTIC value: when something
+  # else is already broken, the issue reports whether the recovery leg the
+  # menu would fall back to is actually serving. Duplicates (the deliberate
+  # alt == alt2 in :deb_di, or shared hosts) collapse in a sort -u.
+  for h in "$alt" "$alt2"; do
+    [ "$h" = "$host" ] && continue
+    echo "alt http://${h}${path}/linux"
+  done
   n_di=$((n_di + 1))
-done < /tmp/di-blocks.$$
-rm -f /tmp/di-blocks.$$
+done < <(awk '
+  /^:(ubu(2004|1804)|deb[0-9]+)$/ { blk=$0; next }
+  blk && /^set suite /   { suite=$3; next }
+  blk && /^set di_host / { host=$3; next }
+  blk && /^set di_path / { path=$3; next }
+  blk && /^set di_alt2 / { alt2=$3; next }
+  blk && /^set di_alt /  { alt=$3; next }
+  blk && /^goto /        { print blk, (host?host:"-"), (path?path:"-"), (suite?suite:"-"), (alt?alt:"-"), (alt2?alt2:"-")
+                           blk=host=path=suite=alt=alt2="" }
+' "$MENU")
 [ "$n_di" = 5 ] || die "expected 5 d-i entries, parsed $n_di"
 
 # --- anaconda: Alma / Rocky / CentOS Stream ---------------------------------
@@ -114,12 +158,19 @@ done < <(awk '
 [ "$n_ks" = 8 ] || die "expected 8 kickstart entries, parsed $n_ks"
 
 # --- openSUSE Leap ----------------------------------------------------------
-leap156=$(getvar leap156_url)
-leap160=$(getvar leap160_url)
-for u in "$leap156" "$leap160"; do
+# Discovered, like the casper releases: a hardcoded pair would ignore an added
+# Leap entry and quietly under-report coverage.
+n_leap=0
+for v in $(sed -n 's/^set leap\([0-9]*\)_url .*/\1/p' "$MENU"); do
+  u=$(getvar "leap${v}_url")
   echo "ipxe http://$u/boot/x86_64/loader/linux"
   echo "ipxe http://$u/boot/x86_64/loader/initrd"
   echo "bulk https://$u/repodata/repomd.xml"
+  # Only the Agama live entry streams a squashfs; it is the one whose menu
+  # entry carries root=live:.
+  grep -q "root=live:https://\${leap${v}_url}" "$MENU" \
+    && echo "bulk https://$u/LiveOS/squashfs.img"
+  n_leap=$((n_leap + 1))
 done
-echo "bulk https://$leap160/LiveOS/squashfs.img"
+[ "$n_leap" -ge 1 ] || die "no 'set leapN_url' lines found in $MENU"
 

@@ -30,8 +30,15 @@ jobs:
       - name: Build the ISO (clean clone, exactly like a user would)
         run: ./build.sh
 
-      - name: Consistency - watchdog URL list generates from the menu
-        run: ./src/menu-urls.sh > /dev/null
+      - name: Consistency - URL list generates, and matches the signing manifest
+        # menu-urls.sh exits non-zero when the menu cannot be fully parsed, and
+        # the sync check catches a pin edited in one file but not the other -
+        # both needs-no-network invariants, so they gate every push rather than
+        # waiting for the weekly watchdog.
+        run: |
+          ./src/menu-urls.sh > /dev/null
+          ./src/menu-manifest-sync.sh
+          test -x src/fallback-test.sh || { echo '::error::src/fallback-test.sh missing'; exit 1; }
 
       - name: BIOS + UEFI boot smoke test
         run: |

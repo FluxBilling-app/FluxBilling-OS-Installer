@@ -99,12 +99,12 @@ NIC by MAC, so there is no NIC-name guessing on any hardware.
 
 ## How it works
 
-One iPXE image with a custom CIDR parser (`fluxcidr`, C, compiled in) and
-eight embedded payload files. At boot iPXE fetches the official kernel/initrd
-for the chosen OS and **injects the matching answer file into the initrd in
-memory** (cpio append) — no vendor artifact is ever rebuilt or redistributed.
-Answer files ride under `flux-*` names so no installer auto-probes them during
-a manual install.
+One iPXE image with a custom CIDR parser (`fluxcidr`, C, compiled in) and the
+payload files listed in `build.sh`'s `EMBEDLIST`. At boot iPXE fetches the
+official kernel/initrd for the chosen OS and **injects the matching answer
+file into the initrd in memory** (cpio append) — no vendor artifact is ever
+rebuilt or redistributed. Answer files ride under `flux-*` names so no
+installer auto-probes them during a manual install.
 
 Per-family mechanics, mirror URLs and the hard-won gotchas are documented
 inline in [fluxbilling.ipxe](fluxbilling.ipxe) and
