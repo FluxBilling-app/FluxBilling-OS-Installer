@@ -2,7 +2,10 @@
 # Build once:  docker build --platform linux/amd64 -t fluxbilling-builder -f src/builder.Dockerfile src
 # After that ./build.sh takes ~15 seconds: it only regenerates the embedded
 # payload object and relinks (the whole object tree is baked below).
-FROM debian:bookworm
+# Digest-pinned: a floating tag lets base-image drift change the toolchain
+# (and therefore the binary) between two otherwise-identical builds. Bump
+# deliberately: docker buildx imagetools inspect debian:bookworm
+FROM debian:bookworm@sha256:9344f8b8992482f80cba753f323adeaf17690076c095ccff6cc9536be98185dc
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git make gcc binutils perl liblzma-dev mtools genisoimage syslinux isolinux \
@@ -35,13 +38,20 @@ RUN git clone https://github.com/ipxe/ipxe /ipxe && \
 # BIOS builds" block as CERT_CMD/PCI_CMD in config/general.h - drop that #undef
 # too, or `console --x .. --picture logo.png` dies with "console: command not
 # found" on every BIOS boot and the branded background never draws.
+# IMAGE_TRUST_CMD: imgtrust/imgverify for signed boot images (docs/
+# SIGNED-BOOT.md). Commented out in stock config/general.h and, unlike
+# DIGEST_CMD, not stripped again for BIOS builds - one edit covers both
+# targets. The trusted roots themselves are passed per-build via TRUST= in
+# build.sh, so the pre-warmed object tree here stays root-agnostic.
 RUN cd /ipxe/src && \
     sed -ri "s|^([[:space:]]*)//(#define[[:space:]]+CONSOLE_SERIAL)|\1\2|" config/console.h && \
+    sed -ri "s|^//(#define[[:space:]]+IMAGE_TRUST_CMD)|\1|" config/general.h && \
     sed -ri "/^[[:space:]]*#undef[[:space:]]+DOWNLOAD_PROTO_HTTPS/d" config/general.h && \
     sed -ri "/^[[:space:]]*#undef[[:space:]]+CONSOLE_FRAMEBUFFER/d" config/console.h && \
     sed -ri "/^[[:space:]]*#undef[[:space:]]+CONSOLE_CMD/d" config/general.h && \
     grep -n "CONSOLE_SERIAL\|CONSOLE_FRAMEBUFFER" config/console.h && \
     grep -n "DOWNLOAD_PROTO_HTTPS\|CONSOLE_CMD" config/general.h && \
+    grep -qE "^#define[[:space:]]+IMAGE_TRUST_CMD" config/general.h && \
     ! grep -qE "^[[:space:]]*#undef[[:space:]]+CONSOLE_CMD" config/general.h
 
 # Legacy keyboard fix. On BIOS builds iPXE's native USB host-controller drivers
