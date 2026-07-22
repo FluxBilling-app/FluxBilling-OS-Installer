@@ -41,8 +41,12 @@ zget() {
 
 H=$(zget fluxhost)
 [ -n "$H" ] || H=fluxserver
-P=$(zget fluxpass)
-[ -n "$P" ] || P=fluxbilling
+# fluxpass is deliberately NOT read here. subiquity archives the autoinstall
+# user-data verbatim to /var/log/installer/autoinstall-user-data on the
+# INSTALLED system, so any password interpolated into the template below is
+# plaintext at rest forever. The late-commands read it from /proc/cmdline at
+# run time instead, and there is no fallback: no fluxpass= means the accounts
+# stay locked rather than getting a default published in a public repo.
 CIDR=$(zget fluxcidr)
 IPCFG=$(zget ip)
 IP=$(echo "$IPCFG" | cut -d: -f1)
@@ -51,7 +55,6 @@ MAC=$(zget BOOTIF | sed 's/^01-//' | tr - :)
 
 # escape for sed replacement
 HS=$(echo "$H" | sed 's/[\/&]/\\&/g')
-PS=$(echo "$P" | sed 's/[\/&]/\\&/g')
 
 D=/root/var/lib/cloud/seed/nocloud
 mkdir -p "$D"
@@ -86,16 +89,33 @@ autoinstall:
   user-data:
     package_update: false
     package_upgrade: false
+    # subiquity copies its logs AND this autoinstall config verbatim into
+    # /var/log/installer on the installed system at the very end of the run -
+    # after every late-command - and those logs record the kernel command
+    # line, fluxpass= included. First boot is the first moment anything can
+    # reach them, which is exactly when this cloud-init runcmd fires.
+    write_files:
+      - path: /usr/local/sbin/flux-scrub
+        permissions: '0700'
+        content: |
+          #!/bin/sh
+          find /var/log/installer -type f 2>/dev/null | while read -r f; do
+              sed -i 's/fluxpass=[^[:space:]]*/fluxpass=<redacted>/g' "$f" 2>/dev/null || :
+          done
+          rm -f /usr/local/sbin/flux-scrub
+    runcmd:
+      - [ /usr/local/sbin/flux-scrub ]
   interactive-sections: []
   identity:
     hostname: '@ZH@'
     username: user
-    password: "$6$0kWT.SxO9YuGjFvn$KvhshBQmh/Y2YZOtLlz.B18HzVwKt9a6GHqNNot9FXucE5Xi3G09wmOvMFf6neReKahGysKMHNz2J50Shnybm."
+    # "!" = locked. subiquity needs the field, but this file is archived onto
+    # the installed disk, so it must never carry a usable hash. The real
+    # credentials are set from /proc/cmdline in the late-commands below.
+    password: "!"
   late-commands:
     - |
-      curtin in-target --target=/target -- bash -c 'echo root:@ZP@ | chpasswd'
-    - |
-      curtin in-target --target=/target -- bash -c 'echo user:@ZP@ | chpasswd'
+      curtin in-target --target=/target -- bash -c 'P=$(tr " " "\n" < /proc/cmdline | sed -n "s/^fluxpass=//p" | head -n1); if [ -n "$P" ]; then printf "root:%s\nuser:%s\n" "$P" "$P" | chpasswd; else echo "FLUX: no fluxpass= on the kernel command line - root and user stay LOCKED." >&2; fi'
     - |
       curtin in-target --target=/target -- sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
     - |
@@ -106,7 +126,7 @@ autoinstall:
       curtin in-target --target=/target -- bash -c 'echo "deb http://security.ubuntu.com/ubuntu $(lsb_release -cs)-security main restricted universe multiverse" >> /etc/apt/sources.list'
 ZEOF
 
-sed -i "s/@ZH@/$HS/g; s/@ZP@/$PS/g" "$D/user-data"
+sed -i "s/@ZH@/$HS/g" "$D/user-data"
 
 # static network for the installed system, matched by boot NIC MAC
 if [ -n "$IP" ] && [ -n "$CIDR" ] && [ -n "$GW" ] && [ -n "$MAC" ]; then

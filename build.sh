@@ -14,9 +14,21 @@ cd "$(dirname "$0")"
 
 BUILDER=fluxbilling-builder
 
-if ! docker image inspect "$BUILDER" >/dev/null 2>&1; then
-  echo ">> building $BUILDER image (one-time, ~10 min)"
+# Rebuild the builder when it is missing OR when builder.Dockerfile has moved
+# on since the image was baked. The Dockerfile carries real product state - the
+# iPXE config patches, the brand colour palette - so a "does the image exist"
+# check alone silently ships the previous palette for as long as the stale
+# image sits in the local cache. The digest is stamped on as a label and
+# compared here; changing the Dockerfile is the only thing that triggers the
+# ~10 min rebuild.
+WANT=$(shasum -a 256 src/builder.Dockerfile | cut -c1-16)
+HAVE=$(docker image inspect -f '{{ index .Config.Labels "flux.builder.hash" }}' \
+         "$BUILDER" 2>/dev/null || true)
+
+if [ "$WANT" != "$HAVE" ]; then
+  echo ">> building $BUILDER image (~10 min; only when builder.Dockerfile changes)"
   docker build --platform linux/amd64 -t "$BUILDER" \
+    --label "flux.builder.hash=$WANT" \
     -f src/builder.Dockerfile src
 fi
 
@@ -32,8 +44,9 @@ docker run --rm --platform linux/amd64 -v "$PWD":/w "$BUILDER" bash -exc '
   # EMBEDLIST must match the image exactly so make stays incremental.
   cp /w/fluxbilling.ipxe /w/src/preseed.cfg /w/src/99fluxseed \
      /w/src/param.conf /w/src/ks.cfg /w/src/autoinst.xml \
-     /w/src/50-flux-agama.sh /w/assets/agama-leap16.json /work/
-  EMBEDLIST=/work/fluxbilling.ipxe,/work/logo.png,/work/preseed.cfg,/work/99fluxseed,/work/param.conf,/work/ks.cfg,/work/autoinst.xml,/work/agama-leap16.json,/work/50-flux-agama.sh
+     /w/src/50-flux-agama.sh /w/assets/agama-leap16.json \
+     /w/src/flux-scrub /work/
+  EMBEDLIST=/work/fluxbilling.ipxe,/work/logo.png,/work/preseed.cfg,/work/99fluxseed,/work/param.conf,/work/ks.cfg,/work/autoinst.xml,/work/agama-leap16.json,/work/50-flux-agama.sh,/work/flux-scrub
 
   # fluxcidr command is already baked into image_cmd.c in the builder image.
 

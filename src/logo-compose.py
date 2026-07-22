@@ -29,8 +29,12 @@ FONT_REG = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 # setup prompts scroll on top of it, so the logo must stay much darker than the
 # bright terminal text or it turns the input to mush. These greys read as a
 # subtle brand watermark that white/cyan text stays legible over.
-INK = (74, 74, 74)      # wordmark  (dim)
-GRAY = (56, 56, 56)      # tagline   (dimmer)
+# Both carry a blue cast toward the brand #038BF8 at UNCHANGED luminance
+# (Rec.709: 56/76/104 -> 72, 44/58/78 -> 57, matching the flat greys they
+# replace), so the watermark reads as brand rather than neutral without
+# getting one step brighter behind the prompts.
+INK = (56, 76, 104)      # wordmark  (dim)
+GRAY = (44, 58, 78)      # tagline   (dimmer)
 
 
 def load_font(path, size, fallback=FONT_BOLD):

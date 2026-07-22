@@ -58,7 +58,9 @@ chk "Ubuntu 24.04 LTS"
 chk "AlmaLinux 9"
 chk "Rocky Linux 9"
 chk "CentOS Stream 9"
-chk "github.com/netbootxyz"
+# 26.04 (the default entry) now boots Canonical's own netboot images.
+chk "releases.ubuntu.com"
+chk "netboot/amd64/linux"
 # (openSUSE/Other section sits below the ~18-row menu viewport on the 80x24
 #  serial console - never drawn unless scrolled, so not display-checked)
 echo "must be 0 -> not-supported: $(grep -acE "$(fz 'Operation not supported')" /tmp/bios.log)"

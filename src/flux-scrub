@@ -1,0 +1,36 @@
+#!/bin/sh
+# FluxBilling: strip install-time credentials from the installed system.
+#
+# The root password reaches every installer on the kernel command line
+# (fluxpass=, and for d-i also passwd/root-password=), because that is the
+# only channel iPXE has once the operator has typed it at the menu. Every
+# installer then records its own command line in the logs it copies onto the
+# target - and it copies them AFTER the last hook any answer file can run.
+# First boot is therefore the earliest moment anything can reach them.
+#
+# Injected into the d-i initrd as /flux-scrub and copied into the target by
+# preseed/late_command, which also enables flux-scrub.service. The other
+# families do the same work inline from their own answer files.
+#
+# Runs once, then deletes itself and its unit.
+
+# cdebconf's question database stores preseeded answers verbatim, including
+# the password questions. It is debug data on an installed system - drop it.
+rm -rf /var/log/installer/cdebconf
+
+for d in /var/log/installer /var/log/anaconda /var/log/YaST2 /var/adm/autoinstall; do
+    [ -d "$d" ] || continue
+    find "$d" -type f 2>/dev/null | while read -r f; do
+        sed -i \
+            -e 's/fluxpass=[^[:space:]]*/fluxpass=<redacted>/g' \
+            -e 's/passwd\/root-password=[^[:space:]]*/passwd\/root-password=<redacted>/g' \
+            -e 's/passwd\/root-password-again=[^[:space:]]*/passwd\/root-password-again=<redacted>/g' \
+            -e 's/passwd\/user-password=[^[:space:]]*/passwd\/user-password=<redacted>/g' \
+            -e 's/passwd\/user-password-again=[^[:space:]]*/passwd\/user-password-again=<redacted>/g' \
+            "$f" 2>/dev/null || :
+    done
+done
+
+systemctl disable flux-scrub.service >/dev/null 2>&1 || :
+rm -f /etc/systemd/system/flux-scrub.service /usr/local/sbin/flux-scrub
+exit 0

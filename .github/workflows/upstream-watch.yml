@@ -1,0 +1,158 @@
+# Watchdog for everything this installer fetches at boot time.
+#
+# The menu pins upstream URLs it does not control. Two things go wrong on
+# their own schedule:
+#
+#   1. A URL disappears. Debian deletes archived suites outright (buster is
+#      already 404 on deb.debian.org), and any pinned tag can be pulled.
+#   2. Content changes underneath a pin. Alma, Rocky and CentOS Stream roll
+#      their repos forward continuously, so a signed-and-pinned kernel/initrd
+#      drifts out of step with the stage2 that inst.repo now serves.
+#
+# Without this, the discovery mechanism for both is a failed install at 2am.
+#
+# This job only DETECTS. Signing stays on a machine you control - putting the
+# code-signing key in Actions secrets would mean a GitHub compromise can mint
+# a kernel every FluxBilling installer trusts, and iPXE has no usable
+# revocation path without an OCSP responder to host. See docs/SIGNED-BOOT.md.
+
+name: upstream-watch
+
+on:
+  schedule:
+    - cron: '17 6 * * 1'   # Mondays, 06:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check boot images resolve, and detect drift from the last signed release
+        id: boot
+        run: |
+          set -uo pipefail
+          fail=0; drift=0
+          : > report.md
+
+          # SHA256SUMS from the most recent signed release, if one exists.
+          tag=$(gh release list --limit 50 --json tagName \
+                  --jq '[.[] | select(.tagName | startswith("boot-"))] | .[0].tagName' \
+                2>/dev/null || true)
+          if [ -n "${tag:-}" ] && [ "$tag" != "null" ]; then
+            gh release download "$tag" -p SHA256SUMS -O signed.sums || : > signed.sums
+            echo "Comparing against signed release \`$tag\`." >> report.md
+          else
+            : > signed.sums
+            echo "No \`boot-*\` release yet - reachability only." >> report.md
+          fi
+          echo >> report.md
+
+          ./src/sign-boot-images.sh --dry-run | while read -r name kind url; do
+            echo "$name $kind $url"
+          done > manifest.txt
+
+          while read -r name kind url; do
+            # An "iso" row means the images are extracted from that ISO rather
+            # than fetched loose (22.04.5 has no netboot tree). Downloading and
+            # hashing a multi-GB ISO weekly would prove nothing - its hash can
+            # never match the extracted files in SHA256SUMS - so check only
+            # that it is still there.
+            if [ "$kind" = iso ]; then
+              code=$(curl -s -o /dev/null -w '%{http_code}' -L -r 0-0 --max-time 120 "$url")
+              case "$code" in
+                200|206) ;;
+                *) echo "- **UNREACHABLE** \`$name\` source ISO ($code) -> $url" >> report.md; fail=1 ;;
+              esac
+              continue
+            fi
+            if ! curl -fsSL --retry 3 --max-time 300 -o img.bin "$url"; then
+              echo "- **UNREACHABLE** \`$name-$kind\` -> $url" >> report.md
+              fail=1; continue
+            fi
+            now=$(sha256sum img.bin | cut -d' ' -f1)
+            was=$(awk -v f="$name-$kind" '$2==f || $2=="*"f {print $1}' signed.sums | head -n1)
+            if [ -n "$was" ] && [ "$was" != "$now" ]; then
+              echo "- **CHANGED UPSTREAM** \`$name-$kind\` - signed \`${was:0:12}\`, now \`${now:0:12}\`" >> report.md
+              drift=1
+            fi
+            rm -f img.bin
+          done < manifest.txt
+
+          echo "fail=$fail" >> "$GITHUB_OUTPUT"
+          echo "drift=$drift" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Check the bulk endpoints the installers fetch
+        id: bulk
+        run: |
+          set -uo pipefail
+          fail=0
+          # Keep in sync with the URL block at the top of fluxbilling.ipxe.
+          # These are fetched by casper/anaconda/linuxrc/dracut, not by iPXE.
+          urls="
+          https://releases.ubuntu.com/22.04.5/ubuntu-22.04.5-live-server-amd64.iso
+          https://releases.ubuntu.com/24.04.4/ubuntu-24.04.4-live-server-amd64.iso
+          https://releases.ubuntu.com/25.10/ubuntu-25.10-live-server-amd64.iso
+          https://releases.ubuntu.com/26.04/ubuntu-26.04-live-server-amd64.iso
+          https://repo.almalinux.org/almalinux/10/BaseOS/x86_64/os/repodata/repomd.xml
+          https://repo.almalinux.org/almalinux/9/BaseOS/x86_64/os/repodata/repomd.xml
+          https://repo.almalinux.org/almalinux/8/BaseOS/x86_64/os/repodata/repomd.xml
+          https://download.rockylinux.org/pub/rocky/10/BaseOS/x86_64/os/repodata/repomd.xml
+          https://download.rockylinux.org/pub/rocky/9/BaseOS/x86_64/os/repodata/repomd.xml
+          https://download.rockylinux.org/pub/rocky/8/BaseOS/x86_64/os/repodata/repomd.xml
+          https://mirror.stream.centos.org/10-stream/BaseOS/x86_64/os/repodata/repomd.xml
+          https://mirror.stream.centos.org/9-stream/BaseOS/x86_64/os/repodata/repomd.xml
+          https://download.opensuse.org/distribution/leap/15.6/repo/oss/repodata/repomd.xml
+          https://download.opensuse.org/distribution/leap/16.0/repo/oss/LiveOS/squashfs.img
+          http://archive.ubuntu.com/ubuntu/dists/focal-updates/Release
+          http://archive.ubuntu.com/ubuntu/dists/bionic-updates/Release
+          http://deb.debian.org/debian/dists/trixie/Release
+          http://deb.debian.org/debian/dists/bookworm/Release
+          http://deb.debian.org/debian/dists/bullseye/Release
+          "
+          : > bulk.md
+          for u in $urls; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -L -r 0-0 --max-time 120 "$u")
+            case "$code" in
+              200|206) ;;
+              *) echo "- **$code** $u" >> bulk.md; fail=1 ;;
+            esac
+          done
+          echo "fail=$fail" >> "$GITHUB_OUTPUT"
+
+      - name: Open an issue when something needs attention
+        if: steps.boot.outputs.fail == '1' || steps.boot.outputs.drift == '1' || steps.bulk.outputs.fail == '1'
+        run: |
+          {
+            echo "Automated check of every endpoint the boot menu depends on."
+            echo
+            cat report.md
+            if [ -s bulk.md ]; then
+              echo
+              echo "### Bulk endpoints not resolving"
+              cat bulk.md
+            fi
+            echo
+            echo "**CHANGED UPSTREAM** means a signed image no longer matches its"
+            echo "official mirror. For Alma/Rocky/CentOS the initrd and the stage2"
+            echo "behind inst.repo come from the same compose, so re-cut the release:"
+            echo
+            echo '```bash'
+            echo './src/sign-boot-images.sh'
+            echo '```'
+            echo
+            echo "then publish it and bump \`flux_boot\` in fluxbilling.ipxe."
+            echo "See docs/SIGNED-BOOT.md."
+          } > body.md
+          gh issue create \
+            --title "upstream-watch: boot dependencies need attention ($(date -u +%Y-%m-%d))" \
+            --body-file body.md
+        env:
+          GH_TOKEN: ${{ github.token }}

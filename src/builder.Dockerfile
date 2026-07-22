@@ -75,6 +75,44 @@ RUN cd /ipxe/src && \
     perl -0777 -pi -e 's/static int efi_autoexec_filesystem \(.*?\n\}\n/static int efi_autoexec_filesystem ( EFI_HANDLE handle __unused,\n\t\t\t\t     struct image **image __unused ) {\n\t\/* FluxBilling: autoexec.ipxe probe disabled; menu is EMBED-ded so no\n\t * autoexec.ipxe is ever shipped and this only emits cosmetic\n\t * "file:autoexec.ipxe... Not found" console lines. *\/\n\treturn -ENOTSUP;\n}\n/s' interface/efi/efi_autoexec.c && \
     grep -q "autoexec.ipxe probe disabled" interface/efi/efi_autoexec.c
 
+# Brand palette for the menu/form CHROME. The `menu`, `item` and `form` widgets
+# never see the ANSI vars from fluxbilling.ipxe - they paint from compile-time
+# colour PAIRS (core/ansicol.c), whose stock values are white-on-red for the
+# selected row and cyan for the edit field. Both are overridden here through
+# config/local/colour.h, the upstream-sanctioned hook (config/colour.h includes
+# it last), so no vendored header is edited.
+#
+#   NORMAL_BG stays COLOR_BLUE and is NOT a visible blue: ansicoldef.c maps
+#   whichever colour equals NORMAL_BG to ANSICOL_MAGIC, and vesafb/efi_fbcon
+#   call ansicol_set_magic_transparent() whenever a background picture is set -
+#   so blue IS the transparency channel that lets the logo watermark show
+#   through the menus. Leave it alone; picking a different NORMAL_BG would
+#   paint a solid box over the watermark, and any colour used as a foreground
+#   elsewhere would turn invisible.
+RUN mkdir -p /ipxe/src/config/local && \
+    printf '%s\n' \
+      '/* FluxBilling brand chrome - see src/builder.Dockerfile */' \
+      '#undef COLOR_SELECT_BG' \
+      '#define COLOR_SELECT_BG COLOR_CYAN   /* brand blue bar, not red */' \
+      '#undef COLOR_ALERT_BG' \
+      '#define COLOR_ALERT_BG  COLOR_CYAN   /* ditto - no red anywhere */' \
+      '#undef COLOR_EDIT_BG' \
+      '#define COLOR_EDIT_BG   COLOR_WHITE  /* password field reads as paper */' \
+      > /ipxe/src/config/local/colour.h
+
+# Give the two chrome colours their real RGB. The 8-colour palette is generated
+# at 0xaa intensity (fbcon_ansi_colour), so plain CYAN is a #00AAAA teal and
+# WHITE a #AAAAAA grey. ansicoldef.c can attach a 24-bit value to a palette
+# entry, which ansicol_set then emits as "38;2;r;g;b" after the basic code -
+# framebuffer consoles repaint exactly, text/serial consoles keep the basic
+# colour. CYAN becomes the fluxbilling.app blue #038BF8 (the same hex the menu
+# script writes for its own accent) and WHITE becomes true #FFFFFF so the menu
+# text stops looking dimmer than the bold-white prompts above it.
+RUN cd /ipxe/src && \
+    perl -pi -e 's{^\t\[COLOR_CYAN\]\t= ANSICOL_DEFAULT \( COLOR_CYAN \),$}{\t[COLOR_CYAN]\t= ANSICOL_DEFINE ( COLOR_CYAN, 0x038bf8 ),}; s{^\t\[COLOR_WHITE\]\t= ANSICOL_DEFAULT \( COLOR_WHITE \),$}{\t[COLOR_WHITE]\t= ANSICOL_DEFINE ( COLOR_WHITE, 0xffffff ),}' core/ansicoldef.c && \
+    grep -q "ANSICOL_DEFINE ( COLOR_CYAN, 0x038bf8 )" core/ansicoldef.c && \
+    grep -q "ANSICOL_DEFINE ( COLOR_WHITE, 0xffffff )" core/ansicoldef.c
+
 # Bake the custom fluxcidr command into the always-linked command file so its
 # object is pre-compiled here, not on every build.
 COPY fluxcidr_cmd.c /tmp/fluxcidr_cmd.c
@@ -88,8 +126,8 @@ RUN cat /tmp/fluxcidr_cmd.c >> /ipxe/src/hci/commands/image_cmd.c
 RUN mkdir -p /work && cd /work && \
     : > fluxbilling.ipxe && : > logo.png && : > preseed.cfg && \
     : > 99fluxseed && : > param.conf && : > ks.cfg && : > autoinst.xml && \
-    : > agama-leap16.json && : > 50-flux-agama.sh
-ARG EMBEDLIST=/work/fluxbilling.ipxe,/work/logo.png,/work/preseed.cfg,/work/99fluxseed,/work/param.conf,/work/ks.cfg,/work/autoinst.xml,/work/agama-leap16.json,/work/50-flux-agama.sh
+    : > agama-leap16.json && : > 50-flux-agama.sh && : > flux-scrub
+ARG EMBEDLIST=/work/fluxbilling.ipxe,/work/logo.png,/work/preseed.cfg,/work/99fluxseed,/work/param.conf,/work/ks.cfg,/work/autoinst.xml,/work/agama-leap16.json,/work/50-flux-agama.sh,/work/flux-scrub
 # The BIOS lkrn tree rebuilds itself once on a fresh checkout (a generated
 # prereg settles only after the first link); EFI settles in one pass. Bake a
 # SECOND lkrn pass so the image ships the already-settled state — otherwise

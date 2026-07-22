@@ -3,15 +3,15 @@
     "id": "Leap_16.0"
   },
   "root": {
-    "password": "fluxbilling",
-    "hashedPassword": false
+    "password": "!",
+    "hashedPassword": true
   },
   "scripts": {
     "post": [
       {
         "name": "flux-identity",
         "chroot": false,
-        "content": "#!/bin/sh\n# FluxBilling: identity from kernel cmdline (fluxhost= fluxpass=).\n# Runs in the live env after install; target is mounted at /mnt.\nC=$(cat /proc/cmdline)\nzget() { echo \"$C\" | tr ' ' '\\n' | sed -n \"s/^$1=//p\" | head -n1; }\nH=$(zget fluxhost); [ -n \"$H\" ] || H=fluxserver\nP=$(zget fluxpass); [ -n \"$P\" ] || P=fluxbilling\necho \"$H\" > /mnt/etc/hostname\nchroot /mnt /bin/sh -c \"echo root:$P | chpasswd\"\nchroot /mnt /bin/sh -c \"id user >/dev/null 2>&1 || useradd -m -c 'Default User' user\"\nchroot /mnt /bin/sh -c \"echo user:$P | chpasswd\"\nsed -i 's/^#\\?PermitRootLogin.*/PermitRootLogin yes/' /mnt/etc/ssh/sshd_config\nchroot /mnt systemctl enable sshd\n"
+        "content": "#!/bin/sh\n# FluxBilling: identity from kernel cmdline (fluxhost= fluxpass=).\n# Runs in the live env after install; target is mounted at /mnt.\n# root ships LOCKED in the profile above - this profile is readable in the\n# live environment and is archived with the install logs, so it must never\n# carry a usable password. No fallback either: a missing fluxpass= leaves the\n# accounts locked rather than handing out a default published in a public repo.\nC=$(cat /proc/cmdline)\nzget() { echo \"$C\" | tr ' ' '\\n' | sed -n \"s/^$1=//p\" | head -n1; }\nH=$(zget fluxhost); [ -n \"$H\" ] || H=fluxserver\nP=$(zget fluxpass)\necho \"$H\" > /mnt/etc/hostname\nchroot /mnt /bin/sh -c \"id user >/dev/null 2>&1 || useradd -m -c 'Default User' user\"\nif [ -n \"$P\" ]; then\n  chroot /mnt /bin/sh -c \"echo root:$P | chpasswd\"\n  chroot /mnt /bin/sh -c \"echo user:$P | chpasswd\"\nelse\n  echo \"FLUX: no fluxpass= on the kernel command line - root and user stay LOCKED.\" >&2\nfi\nunset P\nsed -i 's/^#\\?PermitRootLogin.*/PermitRootLogin yes/' /mnt/etc/ssh/sshd_config\nchroot /mnt systemctl enable sshd\n# The kernel command line reaches the installation logs Agama copies onto the\n# target; strip the password out of anything that persists.\nfind /mnt/var/log -type f 2>/dev/null | while read -r f; do\n  sed -i 's/fluxpass=[^[:space:]]*/fluxpass=<redacted>/g' \"$f\" 2>/dev/null || :\ndone\n"
       }
     ]
   }

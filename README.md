@@ -119,9 +119,43 @@ inline in [fluxbilling.ipxe](fluxbilling.ipxe) and
 - Internet reachability from the static IP you enter.
 - Password rides the kernel command line: letters, digits and `._-!@#%^*+=`
   are safe; avoid spaces, quotes, `;`, `\`, `/`.
-- Fallback identity if prompts arrive empty: `fluxserver` / `fluxbilling`.
+- Fallback hostname if the prompt arrives empty: `fluxserver`. There is **no
+  fallback password** — if `fluxpass=` is missing, both accounts are left
+  locked rather than given a known default.
+- **Secure Boot must be off.** `ipxe.efi` is built here and is not signed by a
+  Microsoft-trusted CA, so UEFI firmware with Secure Boot enabled refuses to
+  load it. No practical fix exists for a custom iPXE build; disable Secure
+  Boot for the install, and re-enable it afterwards if the installed OS ships
+  a signed shim (Ubuntu, Debian, Alma, Rocky and Leap all do).
 - Tested end-to-end so far: Ubuntu 24.04 on Dell iDRAC. The other entries
   share the same verified mechanics but deserve a hardware smoke test.
+
+## Security
+
+What is and is not protected, honestly:
+
+- **Packages are verified.** APT and DNF check every package against the
+  distro GPG keys, so what lands on disk is signature-checked end to end.
+- **Bulk downloads use HTTPS.** The Ubuntu ISO, the anaconda stage2 and
+  repos, the Leap live squashfs and `install=` tree are all fetched by the
+  installer, which carries a full CA bundle.
+- **Kernel and initrd fetches are plain HTTP and unverified.** iPXE trusts
+  only the iPXE root CA and completes public chains by pulling a cross-signed
+  certificate over plain HTTP from `ca.ipxe.org`, so HTTPS there would add a
+  third-party boot dependency without buying verified transport. Run the
+  installer on a trusted management network.
+- **Credentials never persist in cleartext.** The root password rides the
+  kernel command line, so every family creates its accounts locked, sets the
+  real password through `chpasswd` (hash only, in `/etc/shadow`), and scrubs
+  `fluxpass=` out of the installer logs on first boot.
+- **Root SSH with password authentication is enabled** on every family. That
+  is a deliberate provisioning convenience — harden it immediately after
+  install if the box faces the internet.
+
+To close the kernel/initrd gap, see [docs/SIGNED-BOOT.md](docs/SIGNED-BOOT.md):
+mirror and sign the ~350 MB of boot images, bake your own CA fingerprint into
+the iPXE binary, and let `imgverify` reject anything tampered with — over
+plain HTTP, with no dependency on anyone else's PKI.
 
 ## Building
 

@@ -4,3 +4,10 @@
 __pycache__/
 *.pyc
 *.bak
+
+# Boot-image signing. The private keys must NEVER reach the repo - anyone
+# holding flux-ca.key can mint a kernel every FluxBilling installer trusts.
+certs/
+*.key
+*.pem
+out/

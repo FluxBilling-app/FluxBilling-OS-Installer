@@ -1,52 +1,105 @@
 #!ipxe
 # Boot menu for the FluxBilling OS installer, baked into the ISO image.
-# Distro image + squashfs URLs live in the block below. Host, network and
+# Distro image + boot-image URLs live in the block below. Host, network and
 # password get asked at runtime and ride out on the kernel command line.
 
 set ctl:hex 1b
-# FluxBilling console palette: two-tone mono + one cyan accent.
+# FluxBilling console palette: two-tone mono + one brand-blue accent.
 # ESC mechanism (ctl:hex 1b + ${ctl:string}) preserved untouched.
 #   ink  = bold white : wordmark, field labels, the active question
 #   meta = plain white: version, portal, hints, values - reads as gray
-#   acc  = cyan 36    : the single restrained accent (a leading '>')
-#   err  = red 31     : genuine failures only
+#   acc  = brand blue : the single restrained accent ('>' steps, '!' failures)
+#   err  = bold white : the failure text itself - no red anywhere
+#
+# The accent is TWO sequences on purpose. Basic cyan 36 lands first, then the
+# xterm 24-bit form carrying the exact fluxbilling.app blue #038BF8. iPXE's
+# framebuffer console parses "38;2;<r>;<g>;<b>" (core/fbcon.c) and repaints
+# with the real brand colour, which the 8-colour palette cannot express - its
+# blue is #0000AA (near-black on this background) and its cyan a #00AAAA teal.
+# Everything else - the BIOS and EFI text consoles, a 16-colour SOL terminal -
+# ignores aspect 38 and every out-of-range parameter that follows it, so those
+# fall back to the cyan already set. Keep 36 as the base for exactly that
+# reason; 34 would be unreadable on black wherever the 24-bit form is dropped.
 set b_on ${ctl:string}[1m
 set b_off ${ctl:string}[22m
 set rst ${ctl:string}[0m
 set cl_wht ${ctl:string}[37m
-set cl_cyn ${ctl:string}[36m
-set cl_red ${ctl:string}[31m
+set cl_blu ${ctl:string}[36m${ctl:string}[38;2;3;139;248m
 set ink ${b_on}${cl_wht}
 set meta ${cl_wht}
-set acc ${cl_cyn}
-set err ${cl_red}
+set acc ${cl_blu}
+set err ${b_on}${cl_wht}
 
 set app_name Flux Installer
 set app_ver 1.0
 set portal FluxBilling.app
 
-# --- image + squashfs endpoints (keep the sqfs tag and iso URL in sync) ---
-set img2204 http://releases.ubuntu.com/22.04.5/ubuntu-22.04.5-live-server-amd64.iso
-set img2404 http://releases.ubuntu.com/24.04.4/ubuntu-24.04.4-live-server-amd64.iso
-set img2510 http://releases.ubuntu.com/25.10/ubuntu-25.10-live-server-amd64.iso
-set img2604 http://releases.ubuntu.com/26.04/ubuntu-26.04-live-server-amd64.iso
-set sqfs2204 https://github.com/netbootxyz/ubuntu-squash/releases/download/22.04.5-be230164
-set sqfs2404 https://github.com/netbootxyz/ubuntu-squash/releases/download/24.04.4-717d3a1a
-set sqfs2510 https://github.com/netbootxyz/ubuntu-squash/releases/download/25.10-64f54a86
-set sqfs2604 https://github.com/netbootxyz/ubuntu-squash/releases/download/26.04-22041617
-# ^ gotcha on version bumps: ubuntu-squash ships both amd64 and arm64 under
-# almost-identical tags, and the asset filenames collide. Before pinning a new
-# tag, confirm you grabbed the x86-64 build - PE machine field reads 0x8664 and
-# a bzImage carries the HdrS magic. Pin the arm64 vmlinuz by mistake and it
-# won't run on x86 at all: EFI LoadImage bails with 0x7f048183 "Could not load
-# image".
+# --- distro image + boot endpoints ---
+#
+# Scheme policy, deliberate and not uniform. Two different clients fetch from
+# these hosts and they have very different trust stores:
+#
+#   iPXE (kernel + initrd) trusts ONLY the iPXE root CA - the default TRUSTED
+#   list in crypto/rootcert.c is a single fingerprint. Any public certificate
+#   therefore fails to chain, and iPXE completes it by pulling a cross-signed
+#   cert from CROSSCERT, which defaults to http://ca.ipxe.org/auto - over PLAIN
+#   HTTP, from a third party. So https on an iPXE fetch buys no verified
+#   transport; it only adds a boot-time dependency on ca.ipxe.org being
+#   reachable from the management network. iPXE fetches stay http:// below.
+#   (22.04.5 is the exception: its images still come from a GitHub release,
+#   which publishes https only. See the note by set boot2204.)
+#
+#   The INSTALLERS - casper, anaconda, linuxrc, dracut - carry a full CA bundle
+#   and validate properly. Everything they pull is https:// below, and that is
+#   the bulk of the bytes: the Ubuntu ISO, the ~800 MB anaconda stage2, the
+#   Leap live squashfs, the package repos.
+#
+# Hence the distro vars below are stored SCHEME-LESS and the scheme is written
+# at each use site. Keep it that way when adding a distro.
+#
+# Ubuntu casper: ONE version string per release drives everything. Canonical
+# publishes the netboot kernel/initrd under the SAME releases.ubuntu.com
+# directory as the ISO, so deriving both from ${rel*} makes kernel/ISO skew
+# structurally impossible - there is no second pin to keep in sync any more.
+# Bumping a point release is now a single edit here.
+#
+# 22.04.5 is the exception: it predates the netboot/ directory, which 404s for
+# that release (and for every /22.04/ variant). Its kernel/initrd have to be
+# extracted from the official ISO instead - see src/sign-boot-images.sh - so
+# until that release is published it is the last third-party pin in the tree.
+set rel2204 22.04.5
+set rel2404 24.04.4
+set rel2510 25.10
+set rel2604 26.04
+set ubu_rel https://releases.ubuntu.com
+# The ISO is fetched by casper inside the initrd, never by iPXE -> https.
+set img2204 ${ubu_rel}/${rel2204}/ubuntu-${rel2204}-live-server-amd64.iso
+set img2404 ${ubu_rel}/${rel2404}/ubuntu-${rel2404}-live-server-amd64.iso
+set img2510 ${ubu_rel}/${rel2510}/ubuntu-${rel2510}-live-server-amd64.iso
+set img2604 ${ubu_rel}/${rel2604}/ubuntu-${rel2604}-live-server-amd64.iso
+# Kernel + initrd, fetched by iPXE. Official Canonical netboot images, from
+# the same compose as the ISO above. http:// deliberately - see the policy
+# note: iPXE cannot verify TLS without leaning on ca.ipxe.org over plain HTTP.
+set boot2404 http://releases.ubuntu.com/${rel2404}/netboot/amd64
+set boot2510 http://releases.ubuntu.com/${rel2510}/netboot/amd64
+set boot2604 http://releases.ubuntu.com/${rel2604}/netboot/amd64
+# TODO: replace with the extracted-and-signed 22.04.5 casper images once the
+# first boot-* release is cut; this is the only non-official source left.
+set boot2204 https://github.com/netbootxyz/ubuntu-squash/releases/download/22.04.5-be230164
+# d-i only: both the iPXE netboot fetch AND the apt mirror d-i is preseeded
+# with. Left http:// on purpose - apt verifies every package against the distro
+# GPG keys regardless of transport, and mirror/protocol=https is not dependable
+# across the 18.04 / Debian 11 installers we still boot.
 set ub_mirror http://archive.ubuntu.com
-set deb_mirror http://deb.debian.org
-set alma_url http://repo.almalinux.org/almalinux
-set rocky_url http://download.rockylinux.org/pub/rocky
-set centos_url http://mirror.stream.centos.org
-set leap156_url http://download.opensuse.org/distribution/leap/15.6/repo/oss
-set leap160_url http://download.opensuse.org/distribution/leap/16.0/repo/oss
+# (Debian's mirror host is set per suite down at :deb13/:deb12/:deb11 - an
+#  archived suite moves to a DIFFERENT host, so one shared var cannot cover it.)
+# Scheme-less: http:// for the iPXE kernel/initrd fetch, https:// for whatever
+# the installer pulls. See the policy note above.
+set alma_url repo.almalinux.org/almalinux
+set rocky_url download.rockylinux.org/pub/rocky
+set centos_url mirror.stream.centos.org
+set leap156_url download.opensuse.org/distribution/leap/15.6/repo/oss
+set leap160_url download.opensuse.org/distribution/leap/16.0/repo/oss
 # Agama reads its profile straight out of the injected initrd file - Agama's
 # URL handling supports the file scheme, so no host has to serve it (the old
 # http://isodisk.atwebpages.com/... copy 404s, and an unreachable profile stops
@@ -72,6 +125,13 @@ imgargs 99fluxseed scripts/casper-bottom/99fluxseed mode=755 mkdir=-1 ||
 imgargs param.conf conf/param.conf mkdir=-1 ||
 imgargs ks.cfg flux-ks.cfg ||
 imgargs autoinst.xml flux-autoinst.xml ||
+# First-boot credential scrub, copied into the target by preseed/late_command.
+# d-i is the one family that cannot do this from its answer file: the password
+# arrives as passwd/root-password= on the command line and lands in
+# /var/log/installer, which d-i copies onto the target after late_command has
+# already run. The other families do the same work inline from their own
+# answer files, so this rides along unread there.
+imgargs flux-scrub flux-scrub ||
 # Agama is the one family whose installer runs AFTER switch_root, so a profile
 # at the initrd root is gone by the time inst.auto is read - and /run there is
 # a tmpfs mount that would shadow an injected file anyway. So the profile goes
@@ -80,15 +140,20 @@ imgargs autoinst.xml flux-autoinst.xml ||
 # way). inst.auto then reads file:///run/flux-agama.json.
 imgargs agama-leap16.json flux-agama.json ||
 imgargs 50-flux-agama.sh var/lib/dracut/hooks/pre-pivot/50-flux-agama.sh mode=755 mkdir=-1 ||
-# logo.png is never read by a kernel, but it MUST be stamped too. iPXE splices
-# EVERY still-registered image into the initrd chain (image/initrd.c skips only
-# IMAGE_HIDDEN; the running script and the executing kernel are temporarily
-# unregistered, so they drop out by themselves - logo.png does not). Without a
-# cpio path it goes in verbatim, and a raw PNG at the head of the chain means
-# "Initramfs unpacking failed: invalid magic at start of compressed archive"
-# -> nothing unpacks -> "Cannot open root device" panic on EVERY entry.
-imgargs logo.png flux-logo.png ||
-# ^ the flux-* prefixes are deliberate. d-i will AUTO-LOAD /preseed.cfg from
+# logo.png is deliberately NOT stamped here. It is true that iPXE splices every
+# still-registered image into the initrd chain (image/initrd.c skips only
+# IMAGE_HIDDEN), so a raw PNG left registered would land at the head of the
+# chain -> "Initramfs unpacking failed: invalid magic" -> "Cannot open root
+# device" panic on EVERY entry. But `console --picture` already removes it:
+# console_exec() ends in "if ( image && ( ! opts.keep ) ) unregister_image()",
+# and the console line above passes no --keep. By the time this block runs the
+# image is gone, so an `imgargs logo.png` finds nothing, falls through to a
+# download of a bare scheme-less name, and prints "Could not start download:
+# Operation not supported" across the top of the branded boot screen - which is
+# exactly what src/qemu-test.sh asserts must never appear. Add --keep to the
+# console line and this line becomes mandatory again; the two go together.
+#
+# The flux-* prefixes above are deliberate. d-i will AUTO-LOAD /preseed.cfg from
 # the initrd root, and YaST sniffs for /autoinst.xml on the media, both with no
 # boot arg at all - so a plainly-named file would silently switch autoinstall
 # (disk wipe included) back on during a MANUAL install. Under the flux-* names
@@ -127,7 +192,7 @@ isset ${editing} && goto commit ||
 goto ask_ip
 
 :net_bad
-echo   ${err}Interface net${nic} not found.${rst}
+echo   ${acc}!${rst} ${err}Interface net${nic} not found.${rst}
 clear nic
 goto net_pick
 
@@ -146,7 +211,7 @@ goto ask_gw
 
 :ip_bad
 echo
-echo   ${err}Use IP/prefix format, e.g. 203.0.113.111/27 (prefix 1-31).${rst}
+echo   ${acc}!${rst} ${err}Use IP/prefix format, e.g. 203.0.113.111/27 (prefix 1-31).${rst}
 clear cidr_in
 goto ask_ip
 
@@ -298,25 +363,32 @@ iseq ${amode} manual && set amode auto || set amode manual
 goto os_pick
 
 # ---- Ubuntu 22.04 and up (casper/subiquity): install ISO streams into RAM ----
+# Canonical names the netboot kernel "linux"; the netbootxyz build 22.04.5
+# still rides on calls it "vmlinuz". The initrd is "initrd" in both, so only
+# the kernel needs a per-release name.
 :ubu2604
 set rtag 2604
+set kname linux
 goto boot_casper
 
 :ubu2510
 set rtag 2510
+set kname linux
 goto boot_casper
 
 :ubu2404
 set rtag 2404
+set kname linux
 goto boot_casper
 
 :ubu2204
 set rtag 2204
+set kname vmlinuz
 goto boot_casper
 
 :boot_casper
-kernel --name kboot ${sqfs${rtag}}/vmlinuz initrd=initrd.magic ${net_kargs} url=${img${rtag}} ${ubu_auto} ${vga_kargs} ${con_kargs} || goto boot_fail
-set iurl ${sqfs${rtag}}/initrd
+kernel --name kboot ${boot${rtag}}/${kname} initrd=initrd.magic ${net_kargs} url=${img${rtag}} ${ubu_auto} ${vga_kargs} ${con_kargs} || goto boot_fail
+set iurl ${boot${rtag}}/initrd
 goto launch
 
 # ---- Ubuntu 18/20 and Debian 11/12/13, via the d-i netboot images ----
@@ -333,21 +405,33 @@ set mir_host archive.ubuntu.com
 set mir_dir /ubuntu
 goto boot_di
 
+# Debian is the ONE family that hard-breaks on its own schedule: once a suite
+# is archived it is DELETED from deb.debian.org (buster already 404s there)
+# and only survives on archive.debian.org, a different host. Nothing can probe
+# for that from here - iPXE has no way to test a URL without downloading it -
+# so each suite carries its own mirror host and archival is a one-line move:
+# set deb_host archive.debian.org for the suite that went away. Ubuntu's
+# releases.ubuntu.com redirects superseded images to old-releases by itself,
+# and Alma/Rocky/CentOS/Leap paths roll forward in place, so only this family
+# needs the manual switch.
 :deb13
 set suite trixie
+set deb_host deb.debian.org
 goto deb_di
 
 :deb12
 set suite bookworm
+set deb_host deb.debian.org
 goto deb_di
 
 :deb11
 set suite bullseye
+set deb_host deb.debian.org
 goto deb_di
 
 :deb_di
-set di_base ${deb_mirror}/debian/dists/${suite}/main/installer-amd64/current/images/netboot/debian-installer/amd64
-set mir_host deb.debian.org
+set di_base http://${deb_host}/debian/dists/${suite}/main/installer-amd64/current/images/netboot/debian-installer/amd64
+set mir_host ${deb_host}
 set mir_dir /debian
 goto boot_di
 
@@ -393,14 +477,17 @@ set ks_base ${centos_url}/9-stream
 goto boot_ks
 
 :boot_ks
-kernel --name kboot ${ks_base}/BaseOS/x86_64/os/images/pxeboot/vmlinuz initrd=initrd.magic ${net_kargs} inst.repo=${ks_base}/BaseOS/x86_64/os/ fluxrepo=${ks_base} inst.text ${ks_auto} ${vga_kargs} ${con_kargs} || goto boot_fail
-set iurl ${ks_base}/BaseOS/x86_64/os/images/pxeboot/initrd.img
+# ks_base is scheme-less. iPXE pulls vmlinuz/initrd over http; anaconda pulls
+# stage2 + every package over https, and ks.cfg builds the AppStream baseurl
+# from fluxrepo, so that one needs the scheme spelled out too.
+kernel --name kboot http://${ks_base}/BaseOS/x86_64/os/images/pxeboot/vmlinuz initrd=initrd.magic ${net_kargs} inst.repo=https://${ks_base}/BaseOS/x86_64/os/ fluxrepo=https://${ks_base} inst.text ${ks_auto} ${vga_kargs} ${con_kargs} || goto boot_fail
+set iurl http://${ks_base}/BaseOS/x86_64/os/images/pxeboot/initrd.img
 goto launch
 
 # ---- openSUSE Leap 15.6 - linuxrc/YaST, AutoYaST read from the injected initrd file ----
 :leap156
-kernel --name kboot ${leap156_url}/boot/x86_64/loader/linux initrd=initrd.magic install=${leap156_url} ifcfg=*=${ip}/${plen},${gwip},${ns1} hostname=${hostnm} textmode=1 ${ay_auto} ${vga_kargs} ${con_kargs} || goto boot_fail
-set iurl ${leap156_url}/boot/x86_64/loader/initrd
+kernel --name kboot http://${leap156_url}/boot/x86_64/loader/linux initrd=initrd.magic install=https://${leap156_url} ifcfg=*=${ip}/${plen},${gwip},${ns1} hostname=${hostnm} textmode=1 ${ay_auto} ${vga_kargs} ${con_kargs} || goto boot_fail
+set iurl http://${leap156_url}/boot/x86_64/loader/initrd
 goto launch
 
 # ---- openSUSE Leap 16.0 - the Agama live installer ----
@@ -410,8 +497,8 @@ goto launch
 # you into interactive Agama: a web UI at https://<ip>, log in as root with the
 # password typed into the menu.
 :leap160
-kernel --name kboot ${leap160_url}/boot/x86_64/loader/linux initrd=initrd.magic root=live:${leap160_url}/LiveOS/squashfs.img rd.neednet=1 ${net_kargs} live.password=${rootpw} ${ag_auto} ${vga_kargs} ${con_kargs} || goto boot_fail
-set iurl ${leap160_url}/boot/x86_64/loader/initrd
+kernel --name kboot http://${leap160_url}/boot/x86_64/loader/linux initrd=initrd.magic root=live:https://${leap160_url}/LiveOS/squashfs.img rd.neednet=1 ${net_kargs} live.password=${rootpw} ${ag_auto} ${vga_kargs} ${con_kargs} || goto boot_fail
+set iurl http://${leap160_url}/boot/x86_64/loader/initrd
 goto launch
 
 :settings
@@ -435,6 +522,6 @@ isset ${got_i} && imgfree iboot ||
 clear got_k
 clear got_i
 echo
-echo   ${err}Boot failed.${rst}${meta} Check settings, network, and mirror availability.${rst}
+echo   ${acc}!${rst} ${err}Boot failed.${rst}${meta} Check settings, network, and mirror availability.${rst}
 prompt Press any key to return to the menu...
 goto os_pick
