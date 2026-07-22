@@ -5,11 +5,11 @@
      initrd as /flux-autoinst.xml (autoyast=file:///flux-autoinst.xml; flux-
      prefix so YaST's automatic /autoinst.xml probe never fires). Identity comes
      from the kernel command line (fluxhost= fluxpass=): the pre-script below
-     rewrites the @ZH@/@ZP@ placeholders into /tmp/profile/modified.xml, which
-     AutoYaST then uses instead of this file. Static network is configured by
-     linuxrc (ifcfg=/hostname= boot args) and carried into the installed
-     system by keep_install_network. No <partitioning> section: YaST uses its
-     automatic whole-disk proposal. -->
+     rewrites the @ZH@ placeholder into /tmp/profile/modified.xml, which
+     AutoYaST then uses instead of this file, and the chroot-script sets the
+     credentials. Static network is configured by linuxrc (ifcfg=/hostname=
+     boot args) and carried into the installed system by keep_install_network.
+     No <partitioning> section: YaST uses its automatic whole-disk proposal. -->
 <profile xmlns="http://www.suse.com/1.0/yast2ns" xmlns:config="http://www.suse.com/1.0/configns">
   <general>
     <mode>
@@ -28,38 +28,78 @@ zget() { echo "$C" | tr ' ' '\n' | sed -n "s/^$1=//p" | head -n1; }
 H=$(zget fluxhost); [ -n "$H" ] || H=fluxserver
 HS=$(echo "$H" | sed 's/[\/&]/\\&/g')
 # fluxpass is deliberately not substituted in: AutoYaST caches this profile
-# onto the installed system, so the password is set in the post-script instead.
+# onto the installed system, so the password is set by the chroot-script.
 cp /tmp/profile/autoinst.xml /tmp/profile/modified.xml
 sed -i "s/@ZH@/$HS/g" /tmp/profile/modified.xml
 ]]></source>
       </script>
     </pre-scripts>
-    <post-scripts config:type="list">
+    <chroot-scripts config:type="list">
       <script>
-        <filename>fluxpost.sh</filename>
+        <filename>fluxcred.sh</filename>
         <interpreter>shell</interpreter>
+        <!-- chrooted=false: run in the INSTALLATION system, with the target
+             mounted at /mnt. -->
+        <chrooted config:type="boolean">false</chrooted>
         <source><![CDATA[#!/bin/sh
-# No fallback password: a missing fluxpass= leaves both accounts locked
-# rather than handing out a default that is published in a public repo.
+# Credentials are set HERE, in a chroot-script, and deliberately not in a
+# post-script. AutoYaST's own documentation is explicit about the difference:
+# chroot-scripts run "before the machine reboots for the first time", while
+# post-scripts run "after it has booted the system for the first time". In a
+# post-script /proc/cmdline is therefore the INSTALLED system's command line,
+# which carries no fluxpass= - so reading it there finds nothing, both
+# accounts keep the locked "!" hash from the <users> section below, and every
+# automated install finishes as an unreachable box.
+#
+# No fallback password: a missing fluxpass= leaves both accounts locked rather
+# than handing out a default that is published in a public repo.
 P=$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^fluxpass=//p' | head -n1)
 if [ -n "$P" ]; then
-    echo "root:$P" | chpasswd
-    echo "user:$P" | chpasswd
+    # stdin, never argv: the password must not reach a command line or be
+    # re-parsed by a shell inside the target.
+    printf 'root:%s\nuser:%s\n' "$P" "$P" | chroot /mnt chpasswd
 else
     echo "FLUX: no fluxpass= on the kernel command line - root and user stay LOCKED." >&2
 fi
 unset P
 
-sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /mnt/etc/ssh/sshd_config
 
-# The kernel command line is echoed into the YaST install logs and the cached
-# profile; strip the password out of anything that persists.
-find /var/log/YaST2 /var/adm/autoinstall -type f 2>/dev/null | while read -r f; do
-    sed -i 's/fluxpass=[^[:space:]]*/fluxpass=<redacted>/g' "$f" 2>/dev/null || :
+# YaST copies its logs and the cached profile onto the target at the very end
+# of the run - after this script - so the redaction cannot happen here. Install
+# the same first-boot oneshot the other families use, ordered ahead of sshd so
+# the box is never reachable while the password is still in the logs.
+mkdir -p /mnt/usr/local/sbin
+cat > /mnt/usr/local/sbin/flux-scrub <<'FLUXEOF'
+#!/bin/sh
+for d in /var/log/YaST2 /var/adm/autoinstall /var/log/installer; do
+    [ -d "$d" ] || continue
+    find "$d" -type f 2>/dev/null | while read -r f; do
+        sed -i 's/fluxpass=[^[:space:]]*/fluxpass=<redacted>/g' "$f" 2>/dev/null || :
+    done
 done
+systemctl disable flux-scrub.service >/dev/null 2>&1 || :
+rm -f /etc/systemd/system/flux-scrub.service /usr/local/sbin/flux-scrub
+FLUXEOF
+chmod 700 /mnt/usr/local/sbin/flux-scrub
+cat > /mnt/etc/systemd/system/flux-scrub.service <<'FLUXEOF'
+[Unit]
+Description=FluxBilling: strip install-time credentials from installer logs
+DefaultDependencies=no
+After=local-fs.target
+Before=sshd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/flux-scrub
+
+[Install]
+WantedBy=multi-user.target
+FLUXEOF
+chroot /mnt systemctl enable flux-scrub.service
 ]]></source>
       </script>
-    </post-scripts>
+    </chroot-scripts>
   </scripts>
   <networking>
     <keep_install_network config:type="boolean">true</keep_install_network>
@@ -70,9 +110,10 @@ done
   <!-- Both accounts ship LOCKED ("!" as an already-encrypted hash). AutoYaST
        caches the profile it ran on the installed system under
        /var/adm/autoinstall/cache/, so a plaintext password here would be at
-       rest forever. The post-script below reads fluxpass= from
-       /proc/cmdline and sets the real credentials through chpasswd, which
-       only ever writes a hash into /etc/shadow. -->
+       rest forever. The chroot-script above reads fluxpass= from
+       /proc/cmdline while the installation system is still running and sets
+       the real credentials through chpasswd, which only ever writes a hash
+       into /etc/shadow. -->
   <users config:type="list">
     <user>
       <username>root</username>
