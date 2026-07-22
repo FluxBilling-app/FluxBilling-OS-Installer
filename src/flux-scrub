@@ -23,6 +23,7 @@ for d in /var/log/installer /var/log/anaconda /var/log/YaST2 /var/adm/autoinstal
     find "$d" -type f 2>/dev/null | while read -r f; do
         sed -i \
             -e 's/fluxpass=[^[:space:]]*/fluxpass=<redacted>/g' \
+            -e 's/live\.password=[^[:space:]]*/live.password=<redacted>/g' \
             -e 's/passwd\/root-password=[^[:space:]]*/passwd\/root-password=<redacted>/g' \
             -e 's/passwd\/root-password-again=[^[:space:]]*/passwd\/root-password-again=<redacted>/g' \
             -e 's/passwd\/user-password=[^[:space:]]*/passwd\/user-password=<redacted>/g' \
