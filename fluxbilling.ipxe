@@ -112,6 +112,60 @@ set rocky_url download.rockylinux.org/pub/rocky
 set centos_url mirror.stream.centos.org
 set leap156_url download.opensuse.org/distribution/leap/15.6/repo/oss
 set leap160_url download.opensuse.org/distribution/leap/16.0/repo/oss
+# The Agama live image must NOT come from ${leap160_url}/LiveOS/squashfs.img:
+# that arch-ambiguous path serves an s390x root filesystem (verified by
+# unsquashfs - /bin/sh is an IBM S/390 ELF), so the x86_64 kernel mounts it
+# and dies at switch_root with "Failed to execute /bin/sh: Exec format
+# error". The per-arch installer ISO is the only published x86_64 live
+# payload; dracut's livenet loop-mounts an ISO URL and finds the nested
+# LiveOS/squashfs.img itself. Unversioned name = tracks the current build.
+set leap160_live download.opensuse.org/distribution/leap/16.0/installer/iso/agama-installer.x86_64-Leap_16.0.iso
+# Oracle Linux: yum.oracle.com serves the BaseOS/AppStream REPOS (plain
+# repodata, which is all anaconda's dnf payload needs) but publishes NO
+# expanded install tree - images/pxeboot/ and .treeinfo 404 there, and the
+# boot artifacts exist officially only inside the boot ISO under
+# yum.oracle.com/ISOS/. So the kernel, initrd AND the anaconda stage2
+# (install.img) are extracted from that official boot ISO by
+# src/sign-boot-images.sh and published on this repo's boot-* release - the
+# same mechanism that replaces the 22.04 netbootxyz pin. These entries fail
+# at :boot_fail until that release is cut; the watchdog probes the URLs and
+# stays red for exactly as long as that is true.
+#
+# The stage2 base is a tag-with-a-slash on purpose: dracut appends
+# /images/install.img to inst.stage2=<base> (no .treeinfo -> default path,
+# see anaconda's anaconda-lib.sh), and GitHub routes
+# /releases/download/<tag>/<asset> with the slash INSIDE the tag - so tag
+# "<flux_rel>-olN/images" + asset "install.img" serves exactly the path
+# anaconda asks for, from a host whose flat release URLs could not otherwise
+# express it. Verify the URL once after cutting a release; if GitHub ever
+# refuses slash tags, any static host that can serve <base>/images/install.img
+# can replace the base here.
+#
+# github.com is https-only; both fetchers validate it: iPXE against the
+# TRUST= roots baked in build.sh (the 22.04 GitHub release already relies on
+# this), anaconda with its full CA bundle.
+set flux_boot https://github.com/FluxBilling-app/FluxBilling-OS-Installer/releases/download
+set flux_rel boot-20260815
+set ol_repo yum.oracle.com/repo/OracleLinux
+# Proxmox VE: no netboot images exist upstream, so kernel + initrd come from
+# the boot-* release (extracted from the official ISO, see
+# sign-boot-images.sh) and the UNMODIFIED official ISO itself is fetched by
+# iPXE and injected into the initramfs as /proxmox.iso, which the stock
+# installer init loop-mounts as its install media (the documented
+# pve-iso-2-pxe mechanism, built into the installer since PVE 6). http:// on
+# purpose, and not only for the usual iPXE-TLS reason: download.proxmox.com's
+# certificate is issued for the cdn.proxmox.com pool and does NOT carry
+# download.proxmox.com in its SANs (verified 2026-07), so an https fetch
+# fails hostname validation outright. The release stages a detached signature
+# for the ISO (proxmox-N-iso.sig), so the future imgverify wiring in
+# docs/SIGNED-BOOT.md can pin its content over plain http like every other
+# boot image. (enterprise.proxmox.com serves the same /iso/ over VALID https
+# today and sign-boot-images.sh fetches from there for exactly that reason;
+# the menu stays on the canonical public download host rather than leaning on
+# the subscription CDN staying anonymous-friendly.)
+set pve_host download.proxmox.com
+set pve9_iso proxmox-ve_9.2-1.iso
+set pve8_iso proxmox-ve_8.4-1.iso
 # Agama reads its profile straight out of the injected initrd file - Agama's
 # URL handling supports the file scheme, so no host has to serve it (the old
 # http://isodisk.atwebpages.com/... copy 404s, and an unreachable profile stops
@@ -144,6 +198,7 @@ imgargs autoinst.xml flux-autoinst.xml ||
 # already run. The other families do the same work inline from their own
 # answer files, so this rides along unread there.
 imgargs flux-scrub flux-scrub ||
+imgargs flux-scrub.service flux-scrub.service ||
 # Agama is the one family whose installer runs AFTER switch_root, so a profile
 # at the initrd root is gone by the time inst.auto is read - and /run there is
 # a tmpfs mount that would shadow an injected file anyway. So the profile goes
@@ -152,6 +207,22 @@ imgargs flux-scrub flux-scrub ||
 # way). inst.auto then reads file:///run/flux-agama.json.
 imgargs agama-leap16.json flux-agama.json ||
 imgargs 50-flux-agama.sh var/lib/dracut/hooks/pre-pivot/50-flux-agama.sh mode=755 mkdir=-1 ||
+# Proxmox automated-install hook. The one family whose installer offers no
+# answer-file argument at all on a stock ISO: unconfigured.sh only runs
+# proxmox-fetch-answer when /cdrom/auto-installer-mode.toml exists, a file
+# only `proxmox-auto-install-assistant prepare-iso` can put INSIDE the ISO.
+# When it is absent, the stock fallback is an interactive debug shell -
+# which is bash, and interactive bash sources /etc/bash.bashrc. This file IS
+# that manual step, automated: it generates /run/automatic-installer-answers
+# from the kernel command line and exits the shell, and unconfigured.sh feeds
+# that file to proxmox-auto-installer regardless of how it appeared. cpio
+# ordering makes the override safe: iPXE appends these entries after the
+# vendor initrd, and later initramfs entries replace earlier ones. Inert
+# everywhere else - it acts only when fluxpveauto=1 (set by :os_pick in
+# automated mode for the pve entries only) AND the proxmox-auto-installer
+# binary are both present; other families' initrds either never source it
+# (busybox sh in d-i/casper) or fail the guards (dracut emergency shells).
+imgargs pve-bashrc etc/bash.bashrc mkdir=-1 ||
 # logo.png is deliberately NOT stamped here. It is true that iPXE splices every
 # still-registered image into the initrd chain (image/initrd.c skips only
 # IMAGE_HIDDEN), so a raw PNG left registered would land at the head of the
@@ -284,8 +355,20 @@ set vga_kargs nomodeset modprobe.blacklist=mgag200
 # Static-network preseed for d-i, fed in under BOTH modes - the values are
 # already keyed in by hand; manual mode just keeps prompting for the rest.
 set di_net net.ifnames=0 biosdevname=0 netcfg/choose_interface=auto netcfg/disable_dhcp=true netcfg/get_ipaddress=${ip} netcfg/get_netmask=${nm} netcfg/get_gateway=${gwip} netcfg/get_nameservers=${ns1} netcfg/confirm_static=true netcfg/get_hostname=${hostnm} netcfg/hostname=${hostnm}
-# d-i credentials - wired up for autoinstall only
-set di_pass passwd/root-password=${rootpw} passwd/root-password-again=${rootpw} passwd/user-password=${rootpw} passwd/user-password-again=${rootpw}
+# d-i credentials - wired up for autoinstall only.
+#
+# The user IDENTITY (fullname + username) must ride the cmdline too, NOT just
+# the preseed file. On Debian netboot d-i the file (/flux-preseed.cfg) is
+# applied before user-setup runs, so passwd/user-fullname + passwd/username
+# from the file are enough. On the Ubuntu 18.04/20.04 legacy netboot build,
+# user-setup runs BEFORE the file preseed lands: the cmdline password is
+# known but the file-only fullname is not, so d-i stops at a critical
+# "Full name for the new user" prompt and a zero-touch install hangs there
+# forever. Cmdline preseeds are read first on every build (that is why the
+# passwords never hung), so the identity goes here as well. Spaceless
+# fullname: d-i splits the kernel cmdline on whitespace, so "Default User"
+# would break - the GECOS field is cosmetic, "Flux" is fine.
+set di_pass passwd/root-password=${rootpw} passwd/root-password-again=${rootpw} passwd/user-password=${rootpw} passwd/user-password-again=${rootpw} passwd/user-fullname=Flux passwd/username=user passwd/root-login=true
 
 :review
 menu Review your setup - fix anything before you continue
@@ -336,13 +419,32 @@ set mode_lbl AUTOMATED
 set mode_seg [ Automated ] Manual
 set con_kargs console=tty0 console=ttyS0,115200n8
 set ubu_auto autoinstall ds=nocloud ${flux_kargs}
-set di_auto auto=true priority=critical preseed/file=/flux-preseed.cfg ${di_pass}
+# locale/keyboard ride the CMDLINE, not only the preseed file: Ubuntu's
+# bionic/focal d-i asks "Select a language" BEFORE it reads preseed/file -
+# proven with a boot whose initramfs verifiably contained the file - and a
+# critical question with no answer stalls the automated install forever.
+# Kernel-cmdline preseeds are loaded at init, ahead of every question, on
+# every d-i vintage. Harmless duplication for Debian, which reads the file
+# in time.
+set di_auto auto=true priority=critical preseed/file=/flux-preseed.cfg locale=en_US keyboard-configuration/layoutcode=us console-setup/ask_detect=false ${di_pass}
+# The flux-hosted Ubuntu entries get their own variant WITHOUT preseed/file=:
+# their -auto-initrd carries the preseed at the auto-load name /preseed.cfg,
+# so the flux-preseed.cfg path does not exist there - and a dangling
+# preseed/file= is not harmless: it resurfaces in the FINISH stage, where
+# the failing re-load desyncs cdebconf and the install wedges in a corrupted
+# main menu (matrix-observed on both 18.04 and 20.04).
+set di_auto_flux auto=true priority=critical locale=en_US keyboard-configuration/layoutcode=us console-setup/ask_detect=false ${di_pass}
 set ks_auto inst.ks=file:///flux-ks.cfg ${flux_kargs}
 set ay_auto autoyast=file:///flux-autoinst.xml ${flux_kargs}
 # inst.install takes a VALUE in Agama (=0 stops after reading the profile so a
 # human can review it); the bare flag was relying on how a valueless option
 # happens to parse. Spell the intent out.
 set ag_auto inst.auto=${agama_url} inst.install=1 inst.finish=reboot ${flux_kargs}
+# proxmox-start-auto-installer is the stock trigger (parse_cmdline in
+# unconfigured.sh); fluxpveauto=1 arms the injected bashrc hook that
+# generates the answers the stock trigger then consumes - see the imgargs
+# note above. ${flux_kargs} rides along for the generator to read.
+set pv_auto proxmox-start-auto-installer fluxpveauto=1 ${flux_kargs}
 # live.password is the Agama live-env web-UI login. Automated installs never
 # need it - the profile sets the real credentials - and it is the one
 # cmdline credential no scrub used to reach, so it rides in MANUAL mode only,
@@ -356,9 +458,11 @@ set mode_seg Automated [ Manual ]
 set con_kargs console=ttyS0,115200n8 console=tty0
 clear ubu_auto
 clear di_auto
+clear di_auto_flux
 clear ks_auto
 clear ay_auto
 clear ag_auto
+clear pv_auto
 set ag_live live.password=${rootpw}
 
 :kargs_done
@@ -381,8 +485,13 @@ item rk9 Rocky Linux 9
 item rk8 Rocky Linux 8
 item cs10 CentOS Stream 10
 item cs9 CentOS Stream 9
+item ol10 Oracle Linux 10
+item ol9 Oracle Linux 9
+item ol8 Oracle Linux 8
 item leap160 openSUSE Leap 16.0
 item leap156 openSUSE Leap 15.6
+item pve9 Proxmox VE 9
+item pve8 Proxmox VE 8
 item settings Back to settings
 choose --default ubu2604 pick || goto os_pick
 goto ${pick}
@@ -458,24 +567,16 @@ goto casper_try
 # suites in this exact layout; bionic and focal are not there yet only
 # because they are still on ESM.
 :ubu2004
-clear di_hop1
-clear di_hop2
+set dver 20.04
 set di_host archive.ubuntu.com
-set di_alt us.archive.ubuntu.com
-set di_alt2 old-releases.ubuntu.com
-set di_path /ubuntu/dists/focal-updates/main/installer-amd64/current/legacy-images/netboot/ubuntu-installer/amd64
 set mir_dir /ubuntu
-goto boot_di
+goto boot_di_flux
 
 :ubu1804
-clear di_hop1
-clear di_hop2
+set dver 18.04
 set di_host archive.ubuntu.com
-set di_alt us.archive.ubuntu.com
-set di_alt2 old-releases.ubuntu.com
-set di_path /ubuntu/dists/bionic-updates/main/installer-amd64/current/images/netboot/ubuntu-installer/amd64
 set mir_dir /ubuntu
-goto boot_di
+goto boot_di_flux
 
 # Debian is the ONE family that hard-breaks on its own schedule: once a suite
 # is archived it is DELETED from deb.debian.org (buster already 404s there)
@@ -514,6 +615,34 @@ set di_alt2 archive.debian.org
 set di_path /debian/dists/${suite}/main/installer-amd64/current/images/netboot/debian-installer/amd64
 set mir_dir /debian
 goto boot_di
+
+# Ubuntu 18.04/20.04 boot their d-i from this repo's boot-* release, NOT from
+# archive.ubuntu.com like the Debian entries below. The released initrd
+# carries /flux-preseed.cfg and /flux-scrub PREPENDED as an uncompressed cpio
+# member (sign-boot-images.sh does the prepend). Reason: iPXE's magic initrd
+# appends the embedded files AFTER the fetched vendor initrd.gz, and the
+# 4.15/5.4 kernels these two entries boot stop unpacking at the first gzip
+# member - "Initramfs unpacking failed: junk in compressed archive", verified
+# empirically in both orders - so everything appended after the vendor image
+# is silently discarded. d-i then answers every cmdline-preseeded question
+# and stalls at "Select a language", the first question that lives only in
+# the file. Prepending inside the released asset is the one layout an old
+# kernel is guaranteed to unpack. Debian's 5.10+/6.x kernels unpack the
+# appended member fine, so those entries keep the plain mirror path and its
+# host-walk fallback. The apt mirror karg still points at di_host - only the
+# boot images move; a flux_boot fetch failure is a boot_fail, same as ol*.
+:boot_di_flux
+# Two initrd assets per release, picked by mode. The -auto-initrd carries the
+# preseed at /preseed.cfg - the name this d-i vintage AUTO-LOADS (it never
+# reads preseed/file= at all; proven by a boot whose initramfs verifiably
+# carried the file under the flux name and still stalled at partitioning).
+# Auto-loading is also why the file must NOT be in the initrd that manual
+# mode boots: it would re-arm automated partitioning on a manual install.
+set di_img ubuntu-${dver}-initrd
+isset ${di_auto} && set di_img ubuntu-${dver}-auto-initrd ||
+kernel --name kboot ${flux_boot}/${flux_rel}/ubuntu-${dver}-vmlinuz initrd=initrd.magic ${di_net} mirror/country=manual mirror/http/hostname=${di_host} mirror/http/directory=${mir_dir} mirror/http/proxy= ${di_auto_flux} ${vga_kargs} ${con_kargs} || goto boot_fail
+set iurl ${flux_boot}/${flux_rel}/${di_img}
+goto launch
 
 :boot_di
 kernel --name kboot http://${di_host}${di_path}/linux initrd=initrd.magic ${di_net} mirror/country=manual mirror/http/hostname=${di_host} mirror/http/directory=${mir_dir} mirror/http/proxy= ${di_auto} ${vga_kargs} ${con_kargs} || goto di_fallback
@@ -595,6 +724,36 @@ kernel --name kboot ${ks_sch}://${ks_base}/BaseOS/x86_64/os/images/pxeboot/vmlin
 set iurl ${ks_sch}://${ks_base}/BaseOS/x86_64/os/images/pxeboot/initrd.img
 goto launch
 
+# ---- Oracle Linux - anaconda + kickstart, boot images from the flux release ----
+# The same kickstart flow as Alma/Rocky/CentOS with two Oracle-shaped
+# differences, both explained at the flux_boot/ol_repo block up top:
+#   1. kernel/initrd/stage2 come from this repo's boot-* release, because
+#      Oracle publishes no install tree - inst.stage2 is passed explicitly
+#      and inst.repo is the plain BaseOS yum repo (repodata only, which the
+#      dnf payload is happy with).
+#   2. yum.oracle.com spells AppStream "OL<v>/appstream/x86_64" - no
+#      "/latest", no "/os" - so the ready-made baseurl rides in as fluxappst=
+#      and ks.cfg prefers it over the fluxrepo-derived path. fluxrepo= is
+#      deliberately NOT set here.
+# OL10, like the rest of the 10-series, needs an x86_64-v3 CPU. Plan on the
+# same 4 GB+ RAM as the other anaconda entries.
+:ol10
+set otag 10
+goto boot_ol
+
+:ol9
+set otag 9
+goto boot_ol
+
+:ol8
+set otag 8
+goto boot_ol
+
+:boot_ol
+kernel --name kboot ${flux_boot}/${flux_rel}/oracle-${otag}-vmlinuz initrd=initrd.magic ${net_kargs} inst.stage2=${flux_boot}/${flux_rel}-ol${otag} inst.repo=https://${ol_repo}/OL${otag}/baseos/latest/x86_64/ fluxappst=https://${ol_repo}/OL${otag}/appstream/x86_64/ inst.text ${ks_auto} ${vga_kargs} ${con_kargs} || goto boot_fail
+set iurl ${flux_boot}/${flux_rel}/oracle-${otag}-initrd
+goto launch
+
 # ---- openSUSE Leap 15.6 - linuxrc/YaST, AutoYaST read from the injected initrd file ----
 :leap156
 kernel --name kboot http://${leap156_url}/boot/x86_64/loader/linux initrd=initrd.magic install=https://${leap156_url} ifcfg=*=${ip}/${plen},${gwip},${ns1} hostname=${hostnm} textmode=1 ${ay_auto} ${vga_kargs} ${con_kargs} || goto boot_fail
@@ -610,9 +769,38 @@ goto launch
 # https://<ip>, log in as root with the password typed into the menu
 # (${ag_live} carries it in manual mode ONLY - see the note at :os_pick).
 :leap160
-kernel --name kboot http://${leap160_url}/boot/x86_64/loader/linux initrd=initrd.magic root=live:https://${leap160_url}/LiveOS/squashfs.img rd.neednet=1 ${net_kargs} ${ag_live} ${ag_auto} ${vga_kargs} ${con_kargs} || goto boot_fail
+kernel --name kboot http://${leap160_url}/boot/x86_64/loader/linux initrd=initrd.magic root=live:https://${leap160_live} rd.neednet=1 ${net_kargs} ${ag_live} ${ag_auto} ${vga_kargs} ${con_kargs} || goto boot_fail
 set iurl http://${leap160_url}/boot/x86_64/loader/initrd
 goto launch
+
+# ---- Proxmox VE - the official installer, ISO streamed into the initramfs ----
+# Three images instead of two: kernel + stock initrd from the boot-* release,
+# then the ENTIRE official ISO (~1.7 GB) as a second initrd whose cpio name
+# is proxmox.iso - the stock installer init loop-mounts exactly that path as
+# its install media (see the pve_host note up top). Everything installs from
+# the ISO in RAM, so plan on 6 GB+; no packages are fetched at install time.
+# ramdisk_size/rw/quiet mirror the ISO's own boot entries. The installer
+# environment DHCPs and simply times out in a static colo - harmless, the
+# TARGET network config comes from the generated answers (automated) or the
+# operator (manual). MANUAL mode is the stock GUI installer on the video
+# console; automated is watchable over SOL like every other family.
+:pve9
+set ptag 9
+set piso ${pve9_iso}
+goto boot_pve
+
+:pve8
+set ptag 8
+set piso ${pve8_iso}
+goto boot_pve
+
+:boot_pve
+kernel --name kboot ${flux_boot}/${flux_rel}/proxmox-${ptag}-vmlinuz initrd=initrd.magic ramdisk_size=16777216 rw quiet ${pv_auto} ${net_kargs} ${vga_kargs} ${con_kargs} || goto boot_fail
+initrd --name iboot ${flux_boot}/${flux_rel}/proxmox-${ptag}-initrd || goto boot_fail
+set got_i 1
+initrd --name pviso http://${pve_host}/iso/${piso} proxmox.iso || goto boot_fail
+set got_p 1
+boot || goto boot_fail
 
 :settings
 goto review
@@ -648,6 +836,9 @@ boot || goto boot_fail
 imgfree kboot ||
 isset ${got_i} && imgfree iboot ||
 clear got_i
+# The Proxmox entries load a third image; same flag discipline as iboot.
+isset ${got_p} && imgfree pviso ||
+clear got_p
 echo
 echo   ${acc}!${rst} ${err}Boot failed.${rst}${meta} Check settings, network, and mirror availability.${rst}
 prompt Press any key to return to the menu...

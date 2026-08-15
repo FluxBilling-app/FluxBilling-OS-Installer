@@ -19,7 +19,7 @@
   <img src="https://img.shields.io/badge/engine-iPXE-blue">
   <img src="https://img.shields.io/badge/image-~3%20MB-brightgreen">
   <img src="https://img.shields.io/badge/boot-BIOS%20%2B%20UEFI-orange">
-  <img src="https://img.shields.io/badge/OS%20entries-19-purple">
+  <img src="https://img.shields.io/badge/OS%20entries-24-purple">
   <img src="https://img.shields.io/badge/license-GPL--2.0--or--later-blue">
 </p>
 
@@ -51,8 +51,21 @@ generated *on the machine itself* from your answers.
 | AlmaLinux | 10, 9, 8 | kickstart (`%pre` from cmdline) |
 | Rocky Linux | 10, 9, 8 | kickstart |
 | CentOS Stream | 10, 9 | kickstart |
+| Oracle Linux&#8224; | 10, 9, 8 | kickstart (same file as Alma/Rocky) |
 | openSUSE Leap | 15.6 | AutoYaST profile |
 | openSUSE Leap | 16.0 | Agama profile injected into the initrd |
+| Proxmox VE&#8224; | 9 (9.2), 8 (8.4) | `answer.toml` generated in-installer from cmdline |
+
+&#8224; Oracle publishes no netboot images and Proxmox no netboot installer at
+all, so these entries boot kernel/initrd (and Oracle's anaconda stage2) from
+this repo's signed `boot-*` release — **they stay on the menu but fail
+cleanly until that release is cut** (see
+[docs/SIGNED-BOOT.md](docs/SIGNED-BOOT.md) and `src/sign-boot-images.sh`).
+The Proxmox install ISO itself streams unmodified from
+`download.proxmox.com` into RAM, where the stock installer finds it as
+`/proxmox.iso` — manual mode is the ordinary Proxmox GUI installer, automated
+mode generates the official `answer.toml` on the machine from your typed
+answers (password as a SHA-512 hash, never plaintext at rest).
 
 ## Quick start
 
@@ -131,9 +144,10 @@ anything:
 ## Requirements & limits
 
 - **RAM:** Ubuntu 22.04+ stream the full live ISO to RAM — **8 GB+**.
-  Alma/Rocky/CentOS stage2 — **4 GB+**. Leap 16.0 — **2.5 GB+**.
-- **CPU:** Alma/Rocky 10 and CentOS Stream 10 need x86_64-v3 (Haswell/EPYC or
-  newer). Older Xeons: use the 9.x entries.
+  Proxmox VE streams its full install ISO the same way — **6 GB+**.
+  Alma/Rocky/CentOS/Oracle stage2 — **4 GB+**. Leap 16.0 — **2.5 GB+**.
+- **CPU:** Alma/Rocky/Oracle 10 and CentOS Stream 10 need x86_64-v3
+  (Haswell/EPYC or newer). Older Xeons: use the 9.x entries.
 - Internet reachability from the static IP you enter.
 - Password rides the kernel command line: letters, digits and `._-!@#%^*+=`
   are safe; avoid spaces, quotes, `;`, `\`, `/`.
@@ -145,8 +159,15 @@ anything:
   load it. No practical fix exists for a custom iPXE build; disable Secure
   Boot for the install, and re-enable it afterwards if the installed OS ships
   a signed shim (Ubuntu, Debian, Alma, Rocky and Leap all do).
-- Tested end-to-end so far: Ubuntu 24.04 on Dell iDRAC. The other entries
-  share the same verified mechanics but deserve a hardware smoke test.
+- Tested end-to-end: **all 24 automated entries, under both legacy BIOS
+  (SeaBIOS) and UEFI (OVMF)** — each install ran to completion in KVM, the
+  guest rebooted off its own disk and accepted a root SSH login with the
+  menu-typed password, with hostname, static IP and os-release asserted
+  (src/install-matrix.sh, 48/48 PASS, 2026-08-15). Ubuntu 24.04 additionally
+  verified on physical Dell iDRAC; the other entries share the same verified
+  mechanics but still deserve a hardware smoke test on real NICs and RAID
+  controllers, which QEMU's single virtio disk and slirp network do not
+  exercise.
 
 ## Security
 
@@ -172,6 +193,17 @@ What is and is not protected, honestly:
   Agama web-UI login) on the command line, and manual mode runs no profile —
   so nothing installs the scrub. Clear `/var/log/agama-installation` after a
   manual Leap 16 install, or use automated mode, which never passes it.
+  Proxmox has no post-install hook a stock ISO can run, so its generated
+  `answer.toml` carries a **SHA-512 crypt hash** instead of the password —
+  what `/etc/shadow` would hold anyway — and the plaintext never exists
+  outside the live installer's kernel command line.
+- **The Proxmox install ISO is fetched over plain HTTP** — forced, not
+  chosen: `download.proxmox.com`'s TLS certificate does not name that host
+  (it names the `cdn.proxmox.com` pool), so an https fetch fails hostname
+  validation. The signed `boot-*` release stages a detached signature for
+  the exact ISO (`proxmox-N-iso.sig`, fetched for signing over valid https
+  from `enterprise.proxmox.com`), closing this the same way the kernel/initrd
+  gap closes.
 - **Root SSH with password authentication is enabled** on every family. That
   is a deliberate provisioning convenience — harden it immediately after
   install if the box faces the internet.
@@ -232,20 +264,26 @@ autoexec stub, and the added `fluxcidr` command
 repository; `./build.sh` rebuilds the released ISO from it. The embedded
 answer files are original work under the same terms.
 
-**No operating system is redistributed here.** Kernels, initrds, install ISOs
-and repositories are fetched at boot, unmodified, from the vendors' own
-mirrors — with one exception: the Ubuntu 22.04 kernel/initrd come from a
-[netboot.xyz](https://netboot.xyz) GitHub release, because Canonical never
-published a netboot tree for that series (see the `boot2204` note in
-[fluxbilling.ipxe](fluxbilling.ipxe); the signed `boot-*` release described in
-[docs/SIGNED-BOOT.md](docs/SIGNED-BOOT.md) replaces it with images extracted
-from the official Ubuntu ISO). Answer files are injected into the vendor
-initrd in RAM, on the operator's own machine.
+**No operating system is redistributed here** — with narrow, documented
+exceptions. Kernels, initrds, install ISOs and repositories are fetched at
+boot, unmodified, from the vendors' own mirrors, except where a vendor
+publishes no netboot artifacts at all: the Ubuntu 22.04 kernel/initrd come
+from a [netboot.xyz](https://netboot.xyz) GitHub release (Canonical never
+published a netboot tree for that series — see the `boot2204` note in
+[fluxbilling.ipxe](fluxbilling.ipxe)), and the signed `boot-*` release
+described in [docs/SIGNED-BOOT.md](docs/SIGNED-BOOT.md) additionally carries
+the Oracle Linux kernel/initrd/stage2 and the Proxmox VE installer
+kernel/initrd, each extracted unmodified from the vendor's official ISO
+(both are freely redistributable under their respective licenses; sources
+are the vendors' own repositories). Answer files are injected into the
+vendor initrd in RAM, on the operator's own machine.
 
 **Trademarks.** Ubuntu is a trademark of Canonical Ltd; Debian of Software in
 the Public Interest, Inc; Red Hat and CentOS of Red Hat, Inc; AlmaLinux of the
 AlmaLinux OS Foundation; Rocky Linux of the Rocky Enterprise Software
-Foundation; openSUSE of SUSE LLC. All marks belong to their respective owners
+Foundation; openSUSE of SUSE LLC; Oracle and Oracle Linux of Oracle and/or its
+affiliates; Proxmox and Proxmox VE of Proxmox Server Solutions GmbH. All marks
+belong to their respective owners
 and are used descriptively to identify the operating systems this installer
 can fetch. This project is not affiliated with, sponsored by or endorsed by
 any of them, nor by the iPXE project or netboot.xyz.

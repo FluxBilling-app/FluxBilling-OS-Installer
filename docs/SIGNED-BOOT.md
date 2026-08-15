@@ -38,8 +38,14 @@ The answer is to stop trusting the transport and verify the payload instead.
 A tampered, truncated or substituted image then fails closed — over plain
 HTTP, with no dependency on anyone else's PKI.
 
-Only kernel and initrd are mirrored: ~350 MB for all 19 pairs, versus ~10 GB
-for the ISOs. Everything bulky stays on the official mirrors.
+Only boot-path images are mirrored — kernel and initrd for all 24 entries,
+plus what two vendors simply do not publish loose: the Oracle Linux anaconda
+stage2 (`install.img`, on a slash tag so `inst.stage2=<base>` resolves — see
+the `flux_boot` note in `fluxbilling.ipxe`) and the sizeable Proxmox
+installer initrds, with a detached signature for the Proxmox install ISO
+itself (its download host cannot serve validating https; the signature pins
+the payload instead). Several GB all told — still nothing bulky that an
+official mirror already serves over verifying https.
 
 ## One-time key generation
 

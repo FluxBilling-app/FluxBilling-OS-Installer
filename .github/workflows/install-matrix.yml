@@ -5,9 +5,12 @@
 # configured with root SSH" was verified on Ubuntu 24.04 on real iDRAC and
 # ASSUMED for the other 18 entries (README says as much). This closes that.
 #
-# MANUAL DISPATCH ONLY. Nineteen jobs of up to two hours that each pull 1-4 GB
-# from a distro mirror is not a per-push cost, and hammering upstream mirrors
-# on every PR would be rude. Run it before a release, or after a pin bump.
+# MANUAL DISPATCH ONLY. Twenty-four jobs of up to two hours that each pull
+# 1-4 GB from a distro mirror is not a per-push cost, and hammering upstream
+# mirrors on every PR would be rude. Run it before a release, or after a pin
+# bump - once per firmware: the 2026-08 audit proved BIOS and UEFI fail in
+# DIFFERENT ways (the 32-bit-iPXE virtio corruption existed only under BIOS),
+# so a green matrix on one says nothing about the other.
 #
 # GitHub's Linux runners expose /dev/kvm, so these are native-speed installs;
 # src/install-matrix.sh refuses to run without it (TCG would take days).
@@ -17,11 +20,25 @@
 name: install-matrix
 
 on:
+  # Push to the test branch runs the whole matrix immediately - this is how it
+  # runs WITHOUT anything on main (workflow_dispatch is only offered from the
+  # default branch). On a push event `inputs.entries` is empty, and the gate
+  # step below treats empty as "all", so the full 19 run.
+  push:
+    branches: [ ci/install-matrix ]
+  # Kept for later: once this lands on main, it becomes a manual button with an
+  # entry filter, so a single family can be re-tested without the full sweep.
   workflow_dispatch:
     inputs:
       entries:
         description: 'Space-separated entry keys, or "all"'
         default: 'all'
+        required: false
+      firmware:
+        description: 'Guest firmware to boot the ISO with'
+        type: choice
+        options: [bios, uefi]
+        default: bios
         required: false
 
 permissions:
@@ -49,13 +66,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     strategy:
-      fail-fast: false      # one broken mirror must not hide the other 18 results
-      max-parallel: 19
+      fail-fast: false      # one broken mirror must not hide the other 23 results
+      max-parallel: 24
       matrix:
+        # ol* and pve* boot from the repo's boot-* release and FAIL with a
+        # fetch error until that release is cut - expected red, not noise.
         entry: [ubu2604, ubu2510, ubu2404, ubu2204, ubu2004, ubu1804,
                 deb13, deb12, deb11,
                 al10, al9, al8, rk10, rk9, rk8, cs10, cs9,
-                leap160, leap156]
+                ol10, ol9, ol8,
+                leap160, leap156,
+                pve9, pve8]
     steps:
       - uses: actions/checkout@v4
 
@@ -76,7 +97,7 @@ jobs:
         if: steps.gate.outputs.run == 'yes'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq qemu-system-x86 qemu-utils sshpass
+          sudo apt-get install -y -qq qemu-system-x86 qemu-utils sshpass ovmf
           # Runner images ship /dev/kvm owned by root:kvm; the job user is not
           # in that group by default, and qemu then falls back to... nothing,
           # because the harness hard-fails instead of silently using TCG.
@@ -91,7 +112,10 @@ jobs:
           # barely 20 GB free and a qcow2 that grows past it kills the install
           # with an I/O error that looks like a product bug.
           sudo mkdir -p /mnt/flux && sudo chown "$USER" /mnt/flux
+          # firmware input: '' on push events; the harness treats UEFI=0 and
+          # empty the same, so a push run is a BIOS run.
           ENTRIES='${{ matrix.entry }}' \
+          UEFI='${{ inputs.firmware == 'uefi' && '1' || '0' }}' \
           ISO="$PWD/FluxBilling-OS-Installer_v1.0.iso" \
           WORK=/mnt/flux LOGDIR="$PWD/matrix-logs" \
           MEMBUDGET_MB=12288 \

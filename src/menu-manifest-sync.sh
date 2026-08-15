@@ -14,9 +14,14 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# The 22.04 GitHub assets are exempt by design on the menu side: the manifest
-# reaches that release through an `iso:` row that extracts the images from the
-# official Ubuntu ISO instead of fetching them loose.
+# The GitHub assets (22.04, Oracle, Proxmox kernel/initrd) are exempt by
+# design on the menu side: the manifest reaches those through extraction rows
+# (`iso:` / `elboot:` / `pveiso:`) that pull the images out of an official
+# ISO instead of fetching them loose - the release itself IS the signed
+# artifact the sync would otherwise demand. The Proxmox install ISO is exempt
+# too: iPXE fetches it, but unmodified and whole, to hand to the installer as
+# its install media - it is not a boot image this repo re-hosts, and the
+# release stages a detached signature for it instead of a mirror.
 #
 # Both lists are materialised into variables FIRST. Reading them straight into
 # a loop via process substitution would hide the producer's exit status from
@@ -29,10 +34,14 @@ manifest_out=$(./src/sign-boot-images.sh --dry-run)
 menu_paths=$(printf '%s\n' "$menu_urls" \
   | awk '$1 == "ipxe" {print $2}' \
   | grep -v 'github\.com/' \
+  | grep -v 'download\.proxmox\.com/iso/' \
   | sed 's|^[a-z]*://||' | sort -u)
 
+# "src" rows are build INPUTS for flux-hosted assets (the 18.04/20.04
+# initrds get the answer files prepended before signing - :boot_di_flux),
+# exempt for the same reason as the iso-extraction rows.
 manifest_paths=$(printf '%s\n' "$manifest_out" \
-  | awk '$2 != "iso" {print $3}' \
+  | awk '$2 != "iso" && $2 != "src" {print $3}' \
   | sed 's|^[a-z]*://||' | sort -u)
 
 [ -n "$menu_paths" ]     || { echo "no ipxe rows from menu-urls.sh" >&2; exit 1; }

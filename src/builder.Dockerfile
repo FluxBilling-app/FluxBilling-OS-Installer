@@ -10,8 +10,10 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git make gcc binutils perl liblzma-dev mtools genisoimage syslinux isolinux \
     syslinux-common syslinux-utils xorriso cpio zstd initramfs-tools-core python3-pil \
-    fonts-dejavu-core gcc-multilib libc6-dev-i386 \
+    fonts-dejavu-core gcc-multilib libc6-dev-i386 xz-utils \
     qemu-system-x86 ovmf ca-certificates curl && rm -rf /var/lib/apt/lists/*
+# (xz-utils: sign-boot-images.sh extracts data.tar.xz out of Ubuntu udebs/debs
+#  inside this image - tar execs the xz binary, liblzma-dev alone is not it)
 # (syslinux-common: ldlinux.c32 — genfsimg silently omits it otherwise and
 #  BIOS isolinux dies with "Failed to load ldlinux.c32")
 # (syslinux-utils: /usr/bin/isohybrid. genfsimg picks the FIRST available of
@@ -136,12 +138,17 @@ RUN cat /tmp/fluxcidr_cmd.c >> /ipxe/src/hci/commands/image_cmd.c
 RUN mkdir -p /work && cd /work && \
     : > fluxbilling.ipxe && : > logo.png && : > preseed.cfg && \
     : > 99fluxseed && : > param.conf && : > ks.cfg && : > autoinst.xml && \
-    : > agama-leap16.json && : > 50-flux-agama.sh && : > flux-scrub
-ARG EMBEDLIST=/work/fluxbilling.ipxe,/work/logo.png,/work/preseed.cfg,/work/99fluxseed,/work/param.conf,/work/ks.cfg,/work/autoinst.xml,/work/agama-leap16.json,/work/50-flux-agama.sh,/work/flux-scrub
+    : > agama-leap16.json && : > 50-flux-agama.sh && : > flux-scrub && \
+    : > flux-scrub.service
+ARG EMBEDLIST=/work/fluxbilling.ipxe,/work/logo.png,/work/preseed.cfg,/work/99fluxseed,/work/param.conf,/work/ks.cfg,/work/autoinst.xml,/work/agama-leap16.json,/work/50-flux-agama.sh,/work/flux-scrub,/work/flux-scrub.service
 # The BIOS lkrn tree rebuilds itself once on a fresh checkout (a generated
 # prereg settles only after the first link); EFI settles in one pass. Bake a
 # SECOND lkrn pass so the image ships the already-settled state — otherwise
 # every --rm container repeats that one-time full BIOS rebuild (~1000 objects).
-RUN cd /ipxe/src && make -j"$(nproc)" bin/ipxe.lkrn EMBED="$EMBEDLIST"
+# x86_64-pcbios, not 32-bit bin/: matches build.sh, which explains why (the
+# 32-bit build cannot address 64-bit PCI BARs, which SeaBIOS places above
+# 4 GiB on guests with more than ~3.5 GiB RAM - virtio init then corrupts
+# the netdev state).
+RUN cd /ipxe/src && make -j"$(nproc)" bin-x86_64-pcbios/ipxe.lkrn EMBED="$EMBEDLIST"
 RUN cd /ipxe/src && make -j"$(nproc)" bin-x86_64-efi/ipxe.efi EMBED="$EMBEDLIST"
-RUN cd /ipxe/src && make -j"$(nproc)" bin/ipxe.lkrn EMBED="$EMBEDLIST"
+RUN cd /ipxe/src && make -j"$(nproc)" bin-x86_64-pcbios/ipxe.lkrn EMBED="$EMBEDLIST"

@@ -1,0 +1,154 @@
+# FluxBilling: automated-install hook for the Proxmox VE installer.
+# Injected by the boot menu into the installer initrd as /etc/bash.bashrc
+# (cpio append - later entries replace the vendor file).
+#
+# WHY A BASHRC, OF ALL THINGS. A stock Proxmox ISO has no answer-file boot
+# argument: unconfigured.sh (the installer's PID 1) only runs
+# proxmox-fetch-answer when /cdrom/auto-installer-mode.toml exists, and only
+# `proxmox-auto-install-assistant prepare-iso` can create that file - INSIDE
+# the ISO, which this menu deliberately fetches unmodified. When the mode
+# file is missing but proxmox-start-auto-installer is on the command line,
+# the stock fallback is an interactive debug shell that says, verbatim:
+#
+#   "to fetch the answer file manually use:
+#      proxmox-fetch-answer MODE >/run/automatic-installer-answers"
+#
+# and after that shell exits, unconfigured.sh pipes
+# /run/automatic-installer-answers into proxmox-auto-installer REGARDLESS of
+# how it got there. That debug shell is interactive bash; interactive bash
+# sources /etc/bash.bashrc; so this file is that documented manual step,
+# automated. Fragile by nature - but it fails SAFE: if a future installer
+# restructures the flow, the operator lands in the stock debug shell with
+# the stock instructions on screen, not in a half-configured install.
+#
+# The answers are generated here, at install time, instead of shipping a
+# static answer.toml, for the same reason ks.cfg has a %pre: the hostname,
+# network and password are typed into the menu at boot, and the target disk
+# and NIC can only be identified on the machine itself.
+
+flux_pve_auto() {
+    # Every guard must hold, in this order, before touching anything:
+    #  - the Proxmox auto-installer exists (this file rides along unread in
+    #    any other family's initrd that happens to run interactive bash,
+    #    e.g. a dracut emergency shell);
+    #  - the menu armed automated mode for a pve entry (fluxpveauto=1 is set
+    #    next to proxmox-start-auto-installer in :os_pick, automated only);
+    #  - this is not the tty3 convenience root shell unconfigured.sh spawns
+    #    in parallel - killing that would cost the operator a live console
+    #    for no gain, and if /etc/profile happens to chain into this file,
+    #    exiting it could fire BEFORE the gate shell and deadlock the flow;
+    #  - no answers exist yet. This is what separates the gate's debug shell
+    #    (spawned precisely because answers are missing - generate and exit)
+    #    from a post-error debug shell (spawned after an install attempt
+    #    consumed the answers - stay interactive so the error can be read).
+    [ -x /usr/bin/proxmox-auto-installer ] || return 0
+    grep -qw 'fluxpveauto=1' /proc/cmdline 2>/dev/null || return 0
+    case "$(tty 2>/dev/null)" in */tty3) return 0 ;; esac
+    local ans=/run/automatic-installer-answers
+    [ -s "$ans" ] && return 0
+
+    echo "FLUX: generating automated-install answers from the kernel command line"
+
+    local c zget h fqdn p plen ipc ip gw ns mac hash disk b n
+    c=$(cat /proc/cmdline)
+    zget() { printf '%s\n' "$c" | tr ' ' '\n' | sed -n "s/^$1=//p" | head -n1; }
+
+    # Hostname: sanitised to what both DNS and TOML can carry - the value
+    # lands inside a quoted TOML string, so shell metacharacters are inert
+    # but a stray quote would truncate it. The installer insists on an FQDN;
+    # bare names get the same domain preseed.cfg hands to d-i.
+    h=$(zget fluxhost | tr -cd 'A-Za-z0-9.-'); [ -n "$h" ] || h=fluxserver
+    case "$h" in *.*) fqdn=$h ;; *) fqdn=$h.fluxbilling.app ;; esac
+
+    plen=$(zget fluxcidr); [ -n "$plen" ] || plen=24
+    # ip=ADDR::GW:NM:HOST::none:NS1:NS2 - same string every family parses.
+    # Field 7 is the autoconf mode ("none"), the first nameserver is field 8.
+    ipc=$(zget ip)
+    ip=$(printf '%s' "$ipc" | cut -d: -f1)
+    gw=$(printf '%s' "$ipc" | cut -d: -f3)
+    ns=$(printf '%s' "$ipc" | cut -d: -f8); [ -n "$ns" ] || ns=8.8.8.8
+    # BOOTIF=01-aa-bb-cc-dd-ee-ff selects the boot NIC by MAC, matching the
+    # udev ID_NET_NAME_MAC property (enx<mac>) by suffix wildcard below.
+    mac=$(zget BOOTIF | sed 's/^01-//; s/-//g')
+
+    # The password never goes into the answers in cleartext: the answer file
+    # outlives this environment if the installer archives it with its logs,
+    # and there is no post-install hook on this family to scrub it (the
+    # [first-boot] section only works from a prepared ISO or a URL). A
+    # SHA-512 crypt hash is what /etc/shadow would hold anyway. perl is a
+    # hard dependency of the installer itself (proxinstall is perl), and the
+    # password reaches it through the ENVIRONMENT - never argv, which any
+    # process could read from /proc while this runs. No fallback password:
+    # an empty fluxpass= yields "!", i.e. root ships LOCKED, like every
+    # other family in this image.
+    p=$(zget fluxpass)
+    if [ -n "$p" ]; then
+        hash=$(FLUXP="$p" perl -e '
+            my @c = ("a".."z", "A".."Z", "0".."9", ".", "/");
+            my $s = join "", map { $c[rand @c] } 1..16;
+            print crypt($ENV{FLUXP}, "\$6\$$s\$");') || hash=
+        # glibc's crypt returns a $6$...$... string for a $6$ salt. A libc
+        # without SHA-512 support instead treats "$6" as a DES salt and
+        # returns a 13-character DES hash of the FIRST 8 password bytes -
+        # silently, which would ship a weaker hash than the operator typed a
+        # password for. Refuse anything that is not the algorithm asked for.
+        case $hash in
+        '$6$'*) ;;
+        *)
+            echo "FLUX: crypt() did not produce a SHA-512 hash - leaving the stock debug shell in charge" >&2
+            unset -v p; unset -f zget
+            return 0
+            ;;
+        esac
+    else
+        echo "FLUX: no fluxpass= on the kernel command line - root ships LOCKED." >&2
+        hash='!'
+    fi
+    unset -v p
+
+    # First FIXED disk, straight from sysfs like preseed.cfg's early_command:
+    # removable media excluded because this very image may be a USB stick or
+    # virtual media, and those enumerate as plain disks. Fail CLOSED - a
+    # nonexistent name makes the installer stop with an error instead of
+    # widening the wipe to whatever disk it fancies.
+    for b in /sys/block/*; do
+        [ -e "$b" ] || continue
+        n=${b##*/}
+        case $n in zram*|loop*|fd*|sr*|ram*|dm-*|md*) continue ;; esac
+        [ "$(cat "$b/removable" 2>/dev/null)" = 0 ] || continue
+        disk=$n; break
+    done
+    [ -n "${disk:-}" ] || disk=flux-no-fixed-disk-found
+
+    # kebab-case keys: accepted since PVE 8.4, the only spelling not
+    # deprecated in 9.x - both ISOs this menu boots qualify. Keyboard,
+    # country and timezone mirror the other answer files in this repo.
+    cat > "$ans" <<EOF
+[global]
+keyboard = "en-us"
+country = "ro"
+fqdn = "$fqdn"
+mailto = "root@localhost"
+timezone = "Europe/Bucharest"
+root-password-hashed = "$hash"
+reboot-on-error = false
+
+[network]
+source = "from-answer"
+cidr = "$ip/$plen"
+gateway = "$gw"
+dns = "$ns"
+filter.ID_NET_NAME_MAC = "*$mac"
+
+[disk-setup]
+filesystem = "ext4"
+disk-list = ["$disk"]
+EOF
+    chmod 600 "$ans"
+    echo "FLUX: answers written for $fqdn ($ip/$plen on *$mac, disk $disk) - resuming automated install"
+    # Exiting this shell returns control to unconfigured.sh, which feeds the
+    # file just written to proxmox-auto-installer.
+    exit 0
+}
+flux_pve_auto
+unset -f flux_pve_auto

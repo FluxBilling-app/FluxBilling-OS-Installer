@@ -19,5 +19,25 @@
 
 if [ -e /flux-agama.json ]; then
     mkdir -p /run
-    cp /flux-agama.json /run/flux-agama.json
+    # @ZH@ -> fluxhost=, substituted HERE rather than echoed into
+    # /mnt/etc/hostname by the post-script: Agama's own finish step writes
+    # the hostname from its OWN settings AFTER post-scripts run, so a file
+    # written there is overwritten with an empty one (matrix-proven: SSH up,
+    # password right, hostname blank). The profile's hostname.static is the
+    # one channel Agama itself honours end to end.
+    # getarg, NEVER a raw /proc/cmdline read: Leap 16's dracut runs its
+    # hooks inside sandboxed systemd services where /proc/cmdline reads
+    # back EMPTY (matrix-proven at both the cmdline and pre-pivot stages),
+    # so the raw read silently yields the fallback hostname on every boot.
+    # dracut-lib's getarg answers from dracut's own cached copy and is the
+    # canonical way for a hook to read a boot argument.
+    type getarg >/dev/null 2>&1 || . /lib/dracut-lib.sh
+    _H=$(getarg fluxhost= 2>/dev/null)
+    [ -n "$_H" ] || _H=fluxserver
+    # Breadcrumb to the kernel log: this hook runs pre-pivot inside the
+    # initrd, where nothing else records what it saw - and "wrong hostname
+    # baked into the profile" is otherwise indistinguishable from an Agama
+    # bug hours later.
+    echo "flux-agama: fluxhost resolved to '$_H'" > /dev/kmsg 2>/dev/null || :
+    sed "s/@ZH@/$_H/g" /flux-agama.json > /run/flux-agama.json
 fi

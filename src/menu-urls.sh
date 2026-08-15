@@ -84,11 +84,13 @@ done
 n_items=$(grep -c '^set rtag ' "$MENU")
 [ "$n_cas" = "$n_items" ] || die "found $n_cas casper releases but $n_items 'set rtag' entries"
 
-# --- d-i: Ubuntu 18.04/20.04 + Debian --------------------------------------
-# Each :ubu*/:deb* entry block sets di_host (possibly via a deb*_host var)
-# and di_path (possibly containing ${suite}); walk the blocks and resolve.
-# The Debian blocks jump to :deb_di for their shared di_alt/di_path; fetch
-# that template separately.
+# --- d-i: Debian (Ubuntu 18.04/20.04 moved to the boot-* release) ----------
+# Each :deb* entry block sets di_host via a deb*_host var and a suite; the
+# blocks jump to :deb_di for their shared di_alt/di_path; fetch that
+# template separately. The two Ubuntu d-i entries no longer walk mirror
+# hosts - they boot flux-hosted assets via :boot_di_flux (their 4.15/5.4
+# kernels cannot unpack iPXE-appended cpio members) and are emitted in
+# their own block below.
 deb_path=$(awk '/^:deb_di$/{f=1} f && /^set di_path /{print $3; exit}' "$MENU")
 [ -n "$deb_path" ] || die "no di_path under :deb_di"
 deb_alt=$(awk '/^:deb_di$/{f=1} f && /^set di_alt /{print $3; exit}' "$MENU")
@@ -100,14 +102,13 @@ n_di=0
 # probed URLs.
 while read -r blk host path suite alt alt2; do
   case "$blk" in
-    :ubu*) [ "$host" != - ] && [ "$path" != - ] || die "incomplete d-i block $blk"
-           [ "$alt" != - ] && [ "$alt2" != - ] || die "no fallback hosts in $blk" ;;
     :deb*) # host is ${debNN_host} - resolve; path/alt come from :deb_di
            var=${host#\$\{}; var=${var%\}}
            host=$(getvar "$var")
            [ "$suite" != - ] || die "no suite in $blk"
            path=${deb_path//\$\{suite\}/$suite}
            alt=$deb_alt; alt2=$deb_alt ;;
+    *) die "unexpected d-i block $blk" ;;
   esac
   rel_path=$(printf '%s' "$path" | sed 's|/main/installer-amd64/.*||')
   emit ipxe "http://${host}${path}/linux"
@@ -127,7 +128,7 @@ while read -r blk host path suite alt alt2; do
   done
   n_di=$((n_di + 1))
 done < <(awk '
-  /^:(ubu(2004|1804)|deb[0-9]+)$/ { blk=$0; next }
+  /^:deb[0-9]+$/ { blk=$0; next }
   blk && /^set suite /   { suite=$3; next }
   blk && /^set di_host / { host=$3; next }
   blk && /^set di_path / { path=$3; next }
@@ -136,7 +137,28 @@ done < <(awk '
   blk && /^goto /        { print blk, (host?host:"-"), (path?path:"-"), (suite?suite:"-"), (alt?alt:"-"), (alt2?alt2:"-")
                            blk=host=path=suite=alt=alt2="" }
 ' "$MENU")
-[ "$n_di" = 5 ] || die "expected 5 d-i entries, parsed $n_di"
+[ "$n_di" = 3 ] || die "expected 3 d-i entries, parsed $n_di"
+
+# Ubuntu 18.04/20.04: boot images from the boot-* release (see :boot_di_flux
+# in the menu). The apt mirror they preseed stays on archive.ubuntu.com;
+# emit each suite's Release file as bulk so the watchdog still notices a
+# vanished suite. The suite names are pinned HERE because the menu no longer
+# carries a dists/ path for these entries.
+flux_boot=$(getvar flux_boot)
+flux_rel=$(getvar flux_rel)
+n_ubudi=0
+for dver in $(sed -n 's/^set dver //p' "$MENU" | sort -u); do
+  emit ipxe "$flux_boot/$flux_rel/ubuntu-$dver-vmlinuz"
+  emit ipxe "$flux_boot/$flux_rel/ubuntu-$dver-initrd"
+  emit ipxe "$flux_boot/$flux_rel/ubuntu-$dver-auto-initrd"
+  case $dver in
+    18.04) emit bulk "http://archive.ubuntu.com/ubuntu/dists/bionic-updates/Release" ;;
+    20.04) emit bulk "http://archive.ubuntu.com/ubuntu/dists/focal-updates/Release" ;;
+    *) die "unknown flux-hosted d-i version $dver - add its apt suite here" ;;
+  esac
+  n_ubudi=$((n_ubudi + 1))
+done
+[ "$n_ubudi" = 2 ] || die "expected 2 flux-hosted d-i entries, parsed $n_ubudi"
 
 # --- anaconda: Alma / Rocky / CentOS Stream ---------------------------------
 # :al*/:rk*/:cs* do `set ks_base ${<host_var>}/<version>` then goto either
@@ -167,6 +189,47 @@ done < <(awk '
 ' "$MENU")
 [ "$n_ks" = 8 ] || die "expected 8 kickstart entries, parsed $n_ks"
 
+# --- Oracle Linux: anaconda, boot images from this repo's boot-* release ----
+# Discovered from the :olN entry labels. The ipxe rows point at the GitHub
+# release - github.com rows are exempt from the signing-manifest sync by
+# design (they ARE the signed release), and they 404 until the release is
+# cut, which is the watchdog telling the truth: the entries do not boot yet.
+# The stage2 goes out as bulk (dracut fetches it with a full CA bundle), and
+# the two yum.oracle.com repos are what anaconda's dnf payload reads.
+flux_boot=$(getvar flux_boot)
+flux_rel=$(getvar flux_rel)
+ol_repo=$(getvar ol_repo)
+n_ol=0
+for v in $(sed -n 's/^:ol\([0-9]*\)$/\1/p' "$MENU"); do
+  emit ipxe "$flux_boot/$flux_rel/oracle-$v-vmlinuz"
+  emit ipxe "$flux_boot/$flux_rel/oracle-$v-initrd"
+  # inst.stage2=<base> makes dracut fetch <base>/images/install.img - the
+  # /images/ segment lives inside the release TAG (see the menu's flux_boot
+  # note), so this URL is exactly what anaconda asks GitHub for.
+  emit bulk "$flux_boot/$flux_rel-ol$v/images/install.img"
+  emit bulk "https://$ol_repo/OL$v/baseos/latest/x86_64/repodata/repomd.xml"
+  emit bulk "https://$ol_repo/OL$v/appstream/x86_64/repodata/repomd.xml"
+  n_ol=$((n_ol + 1))
+done
+[ "$n_ol" = 3 ] || die "expected 3 Oracle Linux entries, parsed $n_ol"
+
+# --- Proxmox VE --------------------------------------------------------------
+# kernel/initrd from the boot-* release; the full official ISO is ALSO an
+# iPXE fetch (it rides into the initramfs as /proxmox.iso), so it gets the
+# ipxe tag and the redirect-sensitive probe, not the bulk one. Plain http is
+# deliberate and currently unavoidable - download.proxmox.com's certificate
+# does not name the host (see the pve_host note in the menu).
+pve_host=$(getvar pve_host)
+n_pve=0
+for v in $(sed -n 's/^:pve\([0-9]*\)$/\1/p' "$MENU"); do
+  iso=$(getvar "pve${v}_iso")
+  emit ipxe "$flux_boot/$flux_rel/proxmox-$v-vmlinuz"
+  emit ipxe "$flux_boot/$flux_rel/proxmox-$v-initrd"
+  emit ipxe "http://$pve_host/iso/$iso"
+  n_pve=$((n_pve + 1))
+done
+[ "$n_pve" = 2 ] || die "expected 2 Proxmox VE entries, parsed $n_pve"
+
 # --- openSUSE Leap ----------------------------------------------------------
 # Discovered, like the casper releases: a hardcoded pair would ignore an added
 # Leap entry and quietly under-report coverage.
@@ -176,11 +239,16 @@ for v in $(sed -n 's/^set leap\([0-9]*\)_url .*/\1/p' "$MENU"); do
   emit ipxe "http://$u/boot/x86_64/loader/linux"
   emit ipxe "http://$u/boot/x86_64/loader/initrd"
   emit bulk "https://$u/repodata/repomd.xml"
-  # Only the Agama live entry streams a squashfs; it is the one whose menu
-  # entry carries root=live:.
-  grep -q "root=live:https://\${leap${v}_url}" "$MENU" \
-    && emit bulk "https://$u/LiveOS/squashfs.img"
   n_leap=$((n_leap + 1))
 done
 [ "$n_leap" -ge 1 ] || die "no 'set leapN_url' lines found in $MENU"
+# The Agama live payload is the per-arch installer ISO (leap*_live vars),
+# NOT ${leapN_url}/LiveOS/squashfs.img - that arch-ambiguous path serves an
+# s390x root filesystem (see the leap160_live note in the menu).
+n_live=0
+for lv in $(sed -n 's/^set leap\([0-9]*\)_live .*/\1/p' "$MENU"); do
+  emit bulk "https://$(getvar "leap${lv}_live")"
+  n_live=$((n_live + 1))
+done
+[ "$n_live" -ge 1 ] || die "no 'set leapN_live' lines found in $MENU"
 

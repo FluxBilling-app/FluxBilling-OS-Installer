@@ -114,8 +114,17 @@ autoinstall:
     # credentials are set from /proc/cmdline in the late-commands below.
     password: "!"
   late-commands:
+    # The identity user is NOT reliably present in /target at late-command
+    # time: 24.04/26.04 subiquity creates it during the install, but
+    # 22.04/25.10 delegate identity to cloud-init on FIRST BOOT - so a bare
+    # "user:...  | chpasswd" fails with pam_chauthtok on those releases, and
+    # subiquity aborts a fully-completed install over it (verified in the
+    # install matrix: ubu2204/ubu2510 died exactly here, ubu2404/ubu2604
+    # passed). Create the account here when it is missing; cloud-init treats
+    # an existing user as "already provisioned" and leaves it - and its
+    # password - alone.
     - |
-      curtin in-target --target=/target -- bash -c 'P=$(tr " " "\n" < /proc/cmdline | sed -n "s/^fluxpass=//p" | head -n1); if [ -n "$P" ]; then printf "root:%s\nuser:%s\n" "$P" "$P" | chpasswd; else echo "FLUX: no fluxpass= on the kernel command line - root and user stay LOCKED." >&2; fi'
+      curtin in-target --target=/target -- bash -c 'P=$(tr " " "\n" < /proc/cmdline | sed -n "s/^fluxpass=//p" | head -n1); if [ -n "$P" ]; then getent passwd user >/dev/null || useradd -m -s /bin/bash -G sudo user; printf "root:%s\nuser:%s\n" "$P" "$P" | chpasswd; else echo "FLUX: no fluxpass= on the kernel command line - root and user stay LOCKED." >&2; fi'
     - |
       curtin in-target --target=/target -- sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
     - |

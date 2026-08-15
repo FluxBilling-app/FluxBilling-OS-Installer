@@ -24,6 +24,7 @@ docker info >/dev/null 2>&1 || die "docker daemon is not running (start Docker D
 PAYLOAD=(fluxbilling.ipxe assets/FluxBilling.png assets/agama-leap16.json
          src/preseed.cfg src/99fluxseed src/param.conf src/ks.cfg
          src/autoinst.xml src/50-flux-agama.sh src/flux-scrub
+         src/flux-scrub.service src/pve-bashrc
          src/logo-compose.py src/builder.Dockerfile src/fluxcidr_cmd.c)
 for f in "${PAYLOAD[@]}"; do
   [ -s "$f" ] || die "payload file missing or empty (iCloud eviction?): $f"
@@ -57,14 +58,15 @@ docker run --rm --platform linux/amd64 -v "$PWD":/w "$BUILDER" bash -exc '
   python3 /w/src/logo-compose.py /w/assets/FluxBilling.png /work/logo.png
 
   # embedded payload: menu, logo, d-i preseed, casper seed hook + trigger,
-  # kickstart (RHEL family), AutoYaST profile (Leap 15.6).
+  # kickstart (RHEL family incl. Oracle), AutoYaST profile (Leap 15.6),
+  # Proxmox automated-install bashrc hook.
   # Overwrite the dummy files warmed into /work by the builder image; the
   # EMBEDLIST must match the image exactly so make stays incremental.
   cp /w/fluxbilling.ipxe /w/src/preseed.cfg /w/src/99fluxseed \
      /w/src/param.conf /w/src/ks.cfg /w/src/autoinst.xml \
      /w/src/50-flux-agama.sh /w/assets/agama-leap16.json \
-     /w/src/flux-scrub /work/
-  EMBEDLIST=/work/fluxbilling.ipxe,/work/logo.png,/work/preseed.cfg,/work/99fluxseed,/work/param.conf,/work/ks.cfg,/work/autoinst.xml,/work/agama-leap16.json,/work/50-flux-agama.sh,/work/flux-scrub
+     /w/src/flux-scrub /w/src/flux-scrub.service /w/src/pve-bashrc /work/
+  EMBEDLIST=/work/fluxbilling.ipxe,/work/logo.png,/work/preseed.cfg,/work/99fluxseed,/work/param.conf,/work/ks.cfg,/work/autoinst.xml,/work/agama-leap16.json,/work/50-flux-agama.sh,/work/flux-scrub,/work/flux-scrub.service,/work/pve-bashrc
 
   # Trusted TLS roots. This is what lets the https fetches iPXE makes (the
   # 22.04.5 GitHub release, and any mirror that 301s http->https) validate
@@ -74,12 +76,24 @@ docker run --rm --platform linux/amd64 -v "$PWD":/w "$BUILDER" bash -exc '
   # certs/flux-ca.crt (the FluxBilling boot CA, public half - see
   # docs/SIGNED-BOOT.md) rides along whenever it exists, which is what makes
   # `imgverify` of signed boot images work with no further build change.
+  #
+  # Starfield Services Root G2 is NOT redundant with the Amazon roots below,
+  # do not drop it: mirror.stream.centos.org is fronted by CloudFront, whose
+  # cert chains leaf -> Amazon RSA 2048 M01 -> Amazon Root CA 1 CROSS-SIGNED
+  # by Starfield Services Root G2. The server presents that cross-signed
+  # Amazon Root CA 1 (issuer Starfield), a different certificate than the
+  # self-signed Amazon_Root_CA_1 mozilla ships; iPXE cannot substitute one for
+  # the other and - with TRUST= replacing the built-in root, the ca.ipxe.org
+  # crosscert fallback is gone - the chain dead-ends unless Starfield G2 is
+  # trusted. Without this line the CentOS Stream 9/10 kernel fetch dies with
+  # "Permission denied" and both entries fail to boot (verified in QEMU).
   TRUSTLIST=""
   for c in ISRG_Root_X1 ISRG_Root_X2 \
            DigiCert_Global_Root_CA DigiCert_Global_Root_G2 DigiCert_Global_Root_G3 \
            USERTrust_RSA_Certification_Authority USERTrust_ECC_Certification_Authority \
            GlobalSign_Root_CA GlobalSign_Root_R46 GlobalSign_Root_E46 \
            Amazon_Root_CA_1 Amazon_Root_CA_2 Amazon_Root_CA_3 Amazon_Root_CA_4 \
+           Starfield_Services_Root_Certificate_Authority_-_G2 \
            Comodo_AAA_Services_root; do
     f=/usr/share/ca-certificates/mozilla/$c.crt
     [ -s "$f" ] || { echo "FATAL: root cert $c missing from ca-certificates" >&2; exit 1; }
@@ -106,10 +120,20 @@ docker run --rm --platform linux/amd64 -v "$PWD":/w "$BUILDER" bash -exc '
   # REPLACES the built-in iPXE root fingerprint, so that fallback fails too.
   # ~30 KB of certs in a 3 MB ISO buys fully offline chain validation.
   cd /ipxe/src
-  make -j"$(nproc)" bin/ipxe.lkrn EMBED="$EMBEDLIST" CERT="$TRUSTLIST" TRUST="$TRUSTLIST"
+  # bin-x86_64-pcbios, NOT the default 32-bit bin/: once a KVM guest has more
+  # RAM than fits under the PCI hole (~3.5 GiB), SeaBIOS assigns the virtio
+  # NIC 64-bit MMIO BAR ABOVE 4 GiB, and a 32-bit iPXE cannot address it -
+  # (no apostrophes in this block: it lives inside a single-quoted bash -c)
+  # device init reads garbage, the netdev list is corrupted, and the machine
+  # either triple-faults at the first menu keypress or boots the installer
+  # with a mangled BOOTIF= MAC and no network. Measured in the install
+  # matrix: 3328 MiB walks, 3584 MiB resets, every e1000/UEFI combination
+  # unaffected. The long-mode BIOS build addresses the high BAR and behaves
+  # identically to the EFI binary on the same guest.
+  make -j"$(nproc)" bin-x86_64-pcbios/ipxe.lkrn EMBED="$EMBEDLIST" CERT="$TRUSTLIST" TRUST="$TRUSTLIST"
   make -j"$(nproc)" bin-x86_64-efi/ipxe.efi EMBED="$EMBEDLIST" CERT="$TRUSTLIST" TRUST="$TRUSTLIST"
 
-  ./util/genfsimg -o /w/FluxBilling-OS-Installer_v1.0.iso bin/ipxe.lkrn bin-x86_64-efi/ipxe.efi
+  ./util/genfsimg -o /w/FluxBilling-OS-Installer_v1.0.iso bin-x86_64-pcbios/ipxe.lkrn bin-x86_64-efi/ipxe.efi
 
   # genfsimg only gets a hybrid MBR from an isohybrid post-pass that is
   # guarded by "isohybrid --version" and SKIPPED SILENTLY when syslinux-utils

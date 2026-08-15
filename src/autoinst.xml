@@ -42,6 +42,12 @@ sed -i "s/@ZH@/$HS/g" /tmp/profile/modified.xml
              mounted at /mnt. -->
         <chrooted config:type="boolean">false</chrooted>
         <source><![CDATA[#!/bin/sh
+# AutoYaST traces every line of this script into
+# /var/adm/autoinstall/logs/<name>.log with set -x - variable assignments
+# included - so tracing must go dark before the password is ever read, or
+# the plaintext lands in an archived log flux-scrub's fluxpass= pattern
+# does not match (observed: "+ P=<the password>" in the log).
+set +x
 # Credentials are set HERE, in a chroot-script, and deliberately not in a
 # post-script. AutoYaST's own documentation is explicit about the difference:
 # chroot-scripts run "before the machine reboots for the first time", while
@@ -55,13 +61,76 @@ sed -i "s/@ZH@/$HS/g" /tmp/profile/modified.xml
 # than handing out a default that is published in a public repo.
 P=$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^fluxpass=//p' | head -n1)
 if [ -n "$P" ]; then
-    # stdin, never argv: the password must not reach a command line or be
-    # re-parsed by a shell inside the target.
-    printf 'root:%s\nuser:%s\n' "$P" "$P" | chroot /mnt chpasswd
+    # NOT plain chpasswd: SUSE routes it through PAM's quality stack even
+    # for root, and a password cracklib dislikes is REJECTED - "BAD
+    # PASSWORD: it is based on a dictionary word" in the script log, both
+    # accounts still locked, and the box installs perfectly unreachable
+    # (found by the install matrix). The operator's password is not this
+    # installer's to veto: hash it here and hand chpasswd the finished
+    # hash with -e, which skips the quality check. perl is part of
+    # inst-sys (YaST depends on it); the password reaches it through the
+    # ENVIRONMENT, never argv - same pattern, same reasoning, as
+    # src/pve-bashrc. Refuse a non-SHA-512 result rather than shipping
+    # whatever a fallback crypt() produced.
+    HASH=$(FLUXP="$P" perl -e '
+        my @c = ("a".."z", "A".."Z", "0".."9", ".", "/");
+        my $s = join "", map { $c[rand @c] } 1..16;
+        print crypt($ENV{FLUXP}, "\$6\$$s\$");') || HASH=
+    case $HASH in
+    '$6$'*)
+        # Deferred to FIRST BOOT, not applied here: at chroot-script time
+        # the 'user' account does not exist yet (YaST materialises the
+        # <users> section afterwards), and SUSE's chpasswd is all-or-
+        # nothing - the whole batch is rejected, root included ("user
+        # 'user' does not exist ... changes ignored", verbatim in this
+        # script's own archived log). And whatever YaST writes afterwards
+        # would overwrite anything set now. So the HASH - never the
+        # password - is parked root-only on the target and applied by a
+        # oneshot at first boot, ordered Before=sshd: after every YaST
+        # stage has finished writing accounts, before the box is ever
+        # reachable. The oneshot deletes the file and itself; the same
+        # hash lives in /etc/shadow from that moment on, so the file at
+        # rest adds no exposure shadow does not already carry.
+        umask 077
+        printf '%s\n' "$HASH" > /mnt/etc/flux-cred.hash
+        mkdir -p /mnt/usr/local/sbin
+        cat > /mnt/usr/local/sbin/flux-cred <<'FLUXEOF'
+#!/bin/sh
+H=$(cat /etc/flux-cred.hash 2>/dev/null)
+if [ -n "$H" ]; then
+    getent passwd user >/dev/null 2>&1 || useradd -m -c 'Default User' user
+    printf 'root:%s\nuser:%s\n' "$H" "$H" | chpasswd -e \
+        || echo "FLUX: first-boot chpasswd -e failed - accounts stay LOCKED." >&2
+fi
+rm -f /etc/flux-cred.hash
+systemctl disable flux-cred.service >/dev/null 2>&1 || :
+rm -f /etc/systemd/system/flux-cred.service /usr/local/sbin/flux-cred
+FLUXEOF
+        chmod 700 /mnt/usr/local/sbin/flux-cred
+        cat > /mnt/etc/systemd/system/flux-cred.service <<'FLUXEOF'
+[Unit]
+Description=FluxBilling: apply install-time credentials
+DefaultDependencies=no
+After=local-fs.target
+Before=sshd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/flux-cred
+
+[Install]
+WantedBy=multi-user.target
+FLUXEOF
+        chroot /mnt systemctl enable flux-cred.service
+        ;;
+    *)
+        echo "FLUX: crypt() did not produce a SHA-512 hash - root and user stay LOCKED." >&2
+        ;;
+    esac
 else
     echo "FLUX: no fluxpass= on the kernel command line - root and user stay LOCKED." >&2
 fi
-unset P
+unset P HASH
 
 sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /mnt/etc/ssh/sshd_config
 

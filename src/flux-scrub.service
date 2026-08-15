@@ -1,0 +1,20 @@
+# Shipped as a FILE and copied into place by preseed/late_command, never
+# written inline from the preseed: generating this unit with an in-target
+# printf put a multi-line quoted string inside the late_command value, and
+# Ubuntu's legacy d-i preseed lexer splits on it - the command tail leaks
+# into the NEXT debconf value ("Modifying debconf priority limit from
+# '> /etc/systemd/system/flux-scrub.service'..." in the captured syslog),
+# finish-install.postinst then chokes ("Illegal number: After=local-fs.target")
+# and the install wedges in a corrupted main menu. Debian's parser copes;
+# Ubuntu 18.04/20.04's does not.
+[Unit]
+Description=FluxBilling: strip install-time credentials from installer logs
+After=local-fs.target
+Before=ssh.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/flux-scrub
+
+[Install]
+WantedBy=multi-user.target

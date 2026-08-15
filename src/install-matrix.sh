@@ -30,6 +30,51 @@ LOGDIR=${LOGDIR:-$WORK/logs}
 ISO=${ISO:-$PWD/FluxBilling-OS-Installer_v1.0.iso}
 PASS=${PASS:-Passw0rd123}
 DISK_GB=${DISK_GB:-20}
+# Multiplies every per-entry timeout. The table below is sized for KVM; an
+# emulated (ALLOW_TCG=1) run is 10-20x slower and would otherwise report
+# "install-never-completed" for installs that were merely slow - a false FAIL
+# is worse than a long wait, because it sends someone debugging a working
+# answer file.
+TMO_MULT=${TMO_MULT:-1}
+# UEFI=1 boots the ISO's ipxe.efi under OVMF instead of ipxe.lkrn under
+# SeaBIOS. This is NOT a stylistic choice - under SeaBIOS the menu triple-
+# faults and the machine RESETS the instant it processes the first keypress,
+# on any guest with RAM above the ~3.5 GB 32-bit PCI hole (measured: 3328 MB
+# walks, 3584 MB resets). That is 17 of the 24 entries below, because anaconda
+# wants 4G and casper wants 8G - so with UEFI=0 the matrix can only ever
+# report on the five d-i entries and the two Leap ones, and every other row
+# fails as "timeout-waiting:IP / subnet" for a reason that has nothing to do
+# with the answer file being tested.
+#
+# Keep the default at 0: BIOS is a real boot path that real operators select,
+# and a green matrix here must not paper over it being broken. Run the sweep
+# with UEFI=1 to get install verdicts, and treat a BIOS run as the regression
+# test for the reset itself.
+UEFI=${UEFI:-0}
+OVMF_CODE=${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}
+OVMF_VARS=${OVMF_VARS:-/usr/share/OVMF/OVMF_VARS_4M.fd}
+# Serial-log phrases that mean the installer has STOPPED and will never come
+# back, so the poll below can name the cause in seconds instead of waiting out
+# the full timeout. Observed, not guessed - in order: subiquity's crash exit,
+# the Proxmox auto-installer failing to find its answer file, a systemd
+# switch_root panic, and d-i asking a critical question it should have been
+# preseeded (a working preseed never renders this).
+#
+# ADDING ONE IS A COMMITMENT: a phrase that also appears in a SUCCESSFUL
+# install turns every green row red and sends someone debugging a working
+# answer file. Grep any candidate against the passing logs of a previous run
+# before adding it. Deliberately absent for that reason: "Boot failed: could
+# not read the boot disk", which SeaBIOS prints on the post-install reboot
+# whenever the boot order reaches the (empty) floppy before the disk.
+# 'Starting debug shell' is DELIBERATELY absent: the Proxmox gate shell is
+# part of the WORKING automated flow (pve-bashrc generates the answers there
+# and exits it seconds later), so matching it kills healthy installs. A pve
+# whose hook is broken sits idle in that shell and falls to the timeout.
+DEAD_MARKERS=(
+  'An error occurred. Press enter to start a shell'
+  'Freezing execution'
+  'Select a language'
+)
 # Total guest RAM allowed in flight at once. Entries are admitted while they
 # fit and queue when they do not, so one budget knob adapts the run to the
 # host instead of a fixed -P N that either wastes a big box or thrashes a
@@ -45,15 +90,22 @@ MEMBUDGET_MB=${MEMBUDGET_MB:-$(awk '/MemTotal/ {printf "%d", $2/1024*0.7}' /proc
 #
 # RAM follows README's "Requirements & limits": casper streams the whole live
 # ISO into RAM (8G), anaconda stages stage2 (4G), Leap 16 Agama (3G), and d-i
-# is happy in 1.5G. Timeouts are ~3x an observed KVM install, generous enough
-# that a slow mirror is not reported as a product failure.
+# is happy in 1.5G. Proxmox pulls the entire official ISO (~1.7G) plus its
+# initrd into the initramfs, so it gets the casper allowance. Timeouts are
+# ~3x an observed KVM install, generous enough that a slow mirror is not
+# reported as a product failure.
+#
+# The ol* and pve* entries fetch kernel/initrd (and Oracle's stage2) from
+# this repo's boot-* GitHub release - they FAIL with a plain fetch error
+# until that release is cut (see src/sign-boot-images.sh), and pass only
+# after it. That is the intended signal, not a harness bug.
 MATRIX='
 ubu2604  Ubuntu-26.04   0   8192  5400
 ubu2510  Ubuntu-25.10   1   8192  5400
 ubu2404  Ubuntu-24.04   2   8192  5400
 ubu2204  Ubuntu-22.04   3   8192  5400
-ubu2004  Ubuntu-20.04   4   1536  5400
-ubu1804  Ubuntu-18.04   5   1536  5400
+ubu2004  Ubuntu-20.04   4   1536  7200
+ubu1804  Ubuntu-18.04   5   1536  7200
 deb13    Debian-13      6   1536  5400
 deb12    Debian-12      7   1536  5400
 deb11    Debian-11      8   1536  5400
@@ -65,8 +117,13 @@ rk9      Rocky-9       13   4096  5400
 rk8      Rocky-8       14   4096  5400
 cs10     CentOS-10     15   4096  5400
 cs9      CentOS-9      16   4096  5400
-leap160  Leap-16.0     17   3072  5400
-leap156  Leap-15.6     18   2048  5400
+ol10     OracleLinux-10 17  4096  5400
+ol9      OracleLinux-9 18   4096  5400
+ol8      OracleLinux-8 19   4096  5400
+leap160  Leap-16.0     20   3072  5400
+leap156  Leap-15.6     21   2048  5400
+pve9     Proxmox-9     22   8192  5400
+pve8     Proxmox-8     23   8192  5400
 '
 
 ENTRIES=${ENTRIES:-$(awk 'NF {print $1}' <<<"$MATRIX")}
@@ -74,11 +131,28 @@ ENTRIES=${ENTRIES:-$(awk 'NF {print $1}' <<<"$MATRIX")}
 # --- preflight: fail loudly and early, never half-run a 90-minute matrix ----
 die() { echo "FATAL: $*" >&2; exit 1; }
 [ -s "$ISO" ] || die "ISO not found or empty: $ISO"
-[ -e /dev/kvm ] || die "/dev/kvm absent - this harness is unusable without hardware virt (TCG would take days)"
-[ "$(uname -m)" = x86_64 ] || die "host is $(uname -m); the guests are x86_64 and need native KVM"
-for t in qemu-system-x86_64 qemu-img sshpass ssh; do
+# ALLOW_TCG=1 is a PLUMBING CHECK ONLY, for developing this harness on a
+# machine with no KVM (an arm64 laptop). It proves the menu walk, the slirp
+# gateway and the SSH forward are wired correctly; it does NOT produce a
+# trustworthy install result, because a TCG install is 10-20x slower than the
+# timeouts assume and will report false FAILs. Never set it in CI.
+ACCEL=kvm
+if [ "${ALLOW_TCG:-0}" = 1 ]; then
+  ACCEL=tcg
+  echo "WARNING: ALLOW_TCG=1 - emulated, results are NOT a valid install verdict"
+else
+  [ -e /dev/kvm ] || die "/dev/kvm absent - this harness is unusable without hardware virt (TCG would take days; set ALLOW_TCG=1 only to debug the harness itself)"
+  [ "$(uname -m)" = x86_64 ] || die "host is $(uname -m); the guests are x86_64 and need native KVM"
+fi
+for t in qemu-system-x86_64 qemu-img sshpass ssh timeout; do
   command -v "$t" >/dev/null || die "missing tool: $t"
 done
+if [ "$UEFI" = 1 ]; then
+  # Fail here rather than per-entry: a missing OVMF blob makes every single
+  # guest die identically at boot, which reads like the ISO is broken.
+  [ -s "$OVMF_CODE" ] || die "UEFI=1 but OVMF code blob missing: $OVMF_CODE (apt-get install ovmf)"
+  [ -s "$OVMF_VARS" ] || die "UEFI=1 but OVMF vars template missing: $OVMF_VARS (apt-get install ovmf)"
+fi
 MENU=${MENU:-$PWD/fluxbilling.ipxe}
 [ -s "$MENU" ] || die "menu not found: $MENU (run from the repo root, or set MENU=)"
 
@@ -93,7 +167,7 @@ check_menu_order() {
   # list compares unequal to every real table only by luck. The explicit
   # emptiness check below is the real backstop.
   got=$(sed -n 's/^item \([a-z0-9_]*\) .*/\1/p' "$MENU" \
-        | sed -n '/^toggle_mode$/,/^settings$/p' | grep -v '^toggle_mode$\|^settings$')
+        | sed -n '/^toggle_mode$/,/^settings$/p' | grep -vE '^(toggle_mode|settings)$')
   [ -n "$got" ] || { echo "FATAL: cannot parse the OS menu out of $MENU"; return 1; }
   if [ "$want" != "$got" ]; then
     echo "FATAL: MATRIX does not match the menu order in $MENU"
@@ -137,7 +211,7 @@ ssh_try() {
   local port=$1; shift
   sshpass -p "$PASS" ssh -p "$port" \
     -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-    -o ConnectTimeout=10 -o PreferredAuthentications=password \
+    -o ConnectTimeout=30 -o PreferredAuthentications=password \
     -o PubkeyAuthentication=no -o LogLevel=ERROR \
     root@127.0.0.1 "$@" 2>/dev/null
 }
@@ -147,9 +221,10 @@ ssh_try() {
 run_entry() {
   local key=$1 label=$2 downs=$3 mem=$4 tmo=$5 port=$6
   local log=$LOGDIR/install-$key.log fifo=$WORK/$key.fifo disk=$WORK/$key.qcow2
+  local vars=$WORK/$key.vars
   local host=flux-$key qpid rc reason=""
 
-  rm -f "$fifo" "$log" "$disk"; mkfifo "$fifo"; : > "$log"
+  rm -f "$fifo" "$log" "$disk" "$vars"; mkfifo "$fifo"; : > "$log"
   qemu-img create -f qcow2 "$disk" "${DISK_GB}G" >/dev/null 2>&1 \
     || { echo "$key FAIL qemu-img-create-failed" > "$LOGDIR/$key.result"; return 1; }
 
@@ -158,8 +233,20 @@ run_entry() {
   # itself forever while the harness waits for an SSH port that never opens.
   # hostfwd targets 10.0.2.15 because the guest holds that address statically -
   # slirp only forwards to the address it was told, and the guest never DHCPs.
+  local cpu=host
+  [ "$ACCEL" = tcg ] && cpu=max      # -cpu host is meaningless without KVM
+  # Firmware. Each guest needs its OWN writable copy of the OVMF vars blob -
+  # OVMF opens it read-write, so a shared template would have 24 guests
+  # scribbling over each other's boot variables.
+  local fw=(-machine "accel=$ACCEL")
+  if [ "$UEFI" = 1 ]; then
+    cp "$OVMF_VARS" "$vars" || { echo "$key FAIL ovmf-vars-copy-failed" > "$LOGDIR/$key.result"; return 1; }
+    fw=(-machine "q35,accel=$ACCEL"
+        -drive "if=pflash,format=raw,unit=0,readonly=on,file=$OVMF_CODE"
+        -drive "if=pflash,format=raw,unit=1,file=$vars")
+  fi
   timeout "$tmo" qemu-system-x86_64 \
-    -machine accel=kvm -cpu host -smp 2 -m "$mem" \
+    "${fw[@]}" -cpu "$cpu" -smp 2 -m "$mem" \
     -drive file="$disk",if=virtio,format=qcow2 \
     -cdrom "$ISO" -boot once=d -nographic \
     -netdev user,id=n0,hostfwd=tcp:127.0.0.1:"$port"-10.0.2.15:22 \
@@ -215,9 +302,27 @@ run_entry() {
     # SSH login with the typed password. Poll until the deadline.
     local deadline=$((SECONDS + tmo - 120))
     reason="install-never-completed"
+    local m
     while [ "$SECONDS" -lt "$deadline" ]; do
       kill -0 "$qpid" 2>/dev/null || { reason="qemu-exited-during-install"; break; }
       if ssh_try "$port" true; then reason=""; break; fi
+      # An installer that has given up sits at a prompt forever, so waiting for
+      # the deadline turns a 90-second death into a 90-minute one and buries
+      # the cause under "install-never-completed". These markers each mean the
+      # installer has STOPPED, and each names its own failure. Every one is
+      # verified to appear in ZERO passing logs - a false FAIL here would send
+      # someone debugging an answer file that works.
+      # EXACT match (-F), not the fz() fuzzy matcher: fz tolerates up to six
+      # characters between every letter (it exists for iPXE's doubled BIOS
+      # console), and across a whole install log that much slack lets a long
+      # phrase assemble itself out of unrelated text - observed: a healthy
+      # Agama live boot "matched" Freezing execution and was killed. Dead
+      # markers are kernel/installer output, which the console never doubles.
+      for m in "${DEAD_MARKERS[@]}"; do
+        grep -aqF -- "$m" "$log" || continue
+        reason="died:$m"
+        break 2
+      done
       sleep 20
     done
   fi
@@ -225,7 +330,11 @@ run_entry() {
   # Post-install assertions - only meaningful once SSH answered.
   if [ -z "$reason" ]; then
     local got_host got_ip got_os
-    got_host=$(ssh_try "$port" 'hostname' | tr -d '\r')
+    # uname -n, not hostname(1): Leap 16's minimal install ships no hostname
+    # binary, and ssh_try discards stderr - so the probe read back empty and
+    # a fully working install was reported as hostname-not-applied. The
+    # kernel nodename is what the login prompt shows and exists everywhere.
+    got_host=$(ssh_try "$port" 'uname -n' | tr -d '\r')
     got_ip=$(ssh_try "$port" 'ip -4 -o addr show scope global' | tr -d '\r')
     got_os=$(ssh_try "$port" '. /etc/os-release; echo "$ID $VERSION_ID"' | tr -d '\r')
     echo "--- post-install: host=$got_host os=$got_os" >> "$log"
@@ -238,7 +347,7 @@ run_entry() {
 
   exec {fd}>&-
   kill "$qpid" 2>/dev/null; wait "$qpid" 2>/dev/null
-  rm -f "$fifo" "$disk"
+  rm -f "$fifo" "$disk" "$vars"
 
   if [ -z "$reason" ]; then
     echo "$key PASS $(cat "$LOGDIR/$key.os" 2>/dev/null)" > "$LOGDIR/$key.result"
@@ -259,6 +368,7 @@ reap() {
 
 echo "===== INSTALL MATRIX ====="
 echo "iso=$ISO  budget=${MEMBUDGET_MB}MB  work=$WORK  logs=$LOGDIR"
+echo "firmware=$([ "$UEFI" = 1 ] && echo 'UEFI (OVMF)' || echo 'BIOS (SeaBIOS)')  accel=$ACCEL"
 echo "entries: $(echo "$ENTRIES" | tr '\n' ' ')"
 rm -f "$LOGDIR"/*.result "$LOGDIR"/*.os
 started=0
@@ -266,6 +376,7 @@ for key in $ENTRIES; do
   row=$(awk -v k="$key" '$1 == k {print; exit}' <<<"$MATRIX")
   [ -n "$row" ] || { echo "$key FAIL unknown-entry" > "$LOGDIR/$key.result"; continue; }
   read -r _ label downs mem tmo <<<"$row"
+  tmo=$((tmo * TMO_MULT))
   [ "$mem" -le "$MEMBUDGET_MB" ] \
     || { echo "$key FAIL needs-${mem}MB-budget-is-${MEMBUDGET_MB}MB" > "$LOGDIR/$key.result"; continue; }
   while true; do
