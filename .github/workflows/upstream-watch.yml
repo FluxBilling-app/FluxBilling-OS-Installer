@@ -286,10 +286,10 @@ jobs:
   #   1. Settings -> Actions -> General -> "Allow GitHub Actions to create and
   #      approve pull requests" must be ON, or `gh pr create` fails outright.
   #   2. A PR opened with the default GITHUB_TOKEN does NOT trigger other
-  #      workflows, so build-test will not run on these PRs. Either merge only
-  #      after pushing an empty commit yourself, or set BUMP_TOKEN (a
-  #      fine-grained PAT with contents+pull-requests write) as a repo secret -
-  #      it is used below when present and makes the bump PR run CI normally.
+  #      workflows, so no other CI runs on these PRs. Either merge only after
+  #      pushing an empty commit yourself, or set BUMP_TOKEN (a fine-grained
+  #      PAT with contents+pull-requests write) as a repo secret - it is used
+  #      below when present and makes the bump PR run CI normally.
   bump:
     runs-on: ubuntu-latest
     steps:
@@ -386,12 +386,12 @@ jobs:
               "releases.ubuntu.com/$series/ now serves $latest; the pinned $have directory will be superseded (fielded ISOs fall back to old-releases automatically, new builds should pin the current release)." \
               "" \
               "- [ ] If a signed boot-* release exists: re-run ./src/sign-boot-images.sh and cut a fresh release" \
-              "- [ ] Confirm build-test ran on this PR - a PR opened by GITHUB_TOKEN does not trigger it (see the prerequisites note in this workflow); push an empty commit if the checks are missing" \
+              "- [ ] Rebuild the ISO and boot-test it before merging - a PR opened by GITHUB_TOKEN does not trigger other workflows (see the prerequisites note in this workflow)" \
               "" \
               "Opened automatically by upstream-watch.")"
             git checkout "${GITHUB_REF_NAME:-main}"
           done
         env:
-          # BUMP_TOKEN when configured (its PRs trigger build-test), otherwise
-          # the default token - see the prerequisites note above.
+          # BUMP_TOKEN when configured (its PRs trigger other workflows),
+          # otherwise the default token - see the prerequisites note above.
           GH_TOKEN: ${{ secrets.BUMP_TOKEN || github.token }}

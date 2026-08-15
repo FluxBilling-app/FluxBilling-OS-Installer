@@ -9,7 +9,7 @@
 # nobody uses), and the menu boots a release that will never appear in a
 # signed release (so imgverify has nothing to check it against).
 #
-# Needs no network, so it gates every push (build-test.yml) as well as the
+# Needs no network, so it is cheap enough to gate every push as well as the
 # weekly watchdog (upstream-watch.yml).
 set -euo pipefail
 cd "$(dirname "$0")/.."

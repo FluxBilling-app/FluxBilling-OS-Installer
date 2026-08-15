@@ -6,6 +6,29 @@ __pycache__/
 *.pyc
 *.bak
 
+# Local editor/agent scratch. Never publishable.
+.claude/
+.vscode/
+.idea/
+
+# iCloud Drive conflict copies ("file 2", "file 3") - this working tree lives
+# on iCloud, which silently forks a second copy on a sync race. They are never
+# the file anyone edited, and one `git add -A` would publish a stale fork.
+* 2
+* 3
+* 2.*
+* 3.*
+
+# The QEMU/KVM test harness stays local. It boots real installs against real
+# mirrors for hours, needs /dev/kvm and a mounted ISO, and is useless to anyone
+# cloning this repo - so it is developed here and not published.
+src/qemu-test.sh
+src/e2e-test.sh
+src/fallback-test.sh
+src/install-matrix.sh
+.github/workflows/build-test.yml
+.github/workflows/install-matrix.yml
+
 # Boot-image signing. The private keys must NEVER reach the repo - anyone
 # holding flux-ca.key can mint a kernel every FluxBilling installer trusts.
 # The CA's PUBLIC certificate is the exception and must be committable:

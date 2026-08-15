@@ -229,8 +229,8 @@ imgargs pve-bashrc etc/bash.bashrc mkdir=-1 ||
 # and the console line above passes no --keep. By the time this block runs the
 # image is gone, so an `imgargs logo.png` finds nothing, falls through to a
 # download of a bare scheme-less name, and prints "Could not start download:
-# Operation not supported" across the top of the branded boot screen - which is
-# exactly what src/qemu-test.sh asserts must never appear. Add --keep to the
+# Operation not supported" across the top of the branded boot screen - the
+# regression the boot walk asserts must never appear. Add --keep to the
 # console line and this line becomes mandatory again; the two go together.
 #
 # The flux-* prefixes above are deliberate. d-i will AUTO-LOAD /preseed.cfg from

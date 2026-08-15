@@ -133,9 +133,8 @@ anything:
 - **Fallback hosts.** A failed casper fetch retries
   `old-releases.ubuntu.com`, where Ubuntu moves superseded point releases; the
   d-i entries walk a country mirror and then the archive host
-  (`archive.debian.org` for a deleted Debian suite).
-  [src/fallback-test.sh](src/fallback-test.sh) boots ISOs with a dead primary
-  to prove both actually fire.
+  (`archive.debian.org` for a deleted Debian suite). Both paths are exercised
+  before a release by booting ISOs with the primary host deliberately dead.
 - **A watchdog.** [upstream-watch](.github/workflows/upstream-watch.yml)
   probes every URL the menu fetches — generated from the menu itself by
   [src/menu-urls.sh](src/menu-urls.sh), never hand-copied — the way iPXE
@@ -163,7 +162,7 @@ anything:
   (SeaBIOS) and UEFI (OVMF)** — each install ran to completion in KVM, the
   guest rebooted off its own disk and accepted a root SSH login with the
   menu-typed password, with hostname, static IP and os-release asserted
-  (src/install-matrix.sh, 48/48 PASS, 2026-08-15). Ubuntu 24.04 additionally
+  (48/48 PASS, 2026-08-15). Ubuntu 24.04 additionally
   verified on physical Dell iDRAC; the other entries share the same verified
   mechanics but still deserve a hardware smoke test on real NICs and RAID
   controllers, which QEMU's single virtio disk and slirp network do not
@@ -222,8 +221,9 @@ Needs Docker. Everything is pinned:
 ```
 
 First run bakes the builder image (~10 min); every rebuild after that is ~15
-seconds. `src/qemu-test.sh` walks the prompts in QEMU; `src/e2e-test.sh`
-verifies the injected files survive the initrd unpack.
+seconds. The build is reproducible from a clean clone: every toolchain
+version, iPXE commit and payload URL is pinned in
+[src/builder.Dockerfile](src/builder.Dockerfile) and [build.sh](build.sh).
 
 ## Why we built this
 
