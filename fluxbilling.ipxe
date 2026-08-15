@@ -31,7 +31,7 @@ set acc ${cl_blu}
 set err ${b_on}${cl_wht}
 
 set app_name Flux Installer
-set app_ver 1.0
+set app_ver 1.1
 set portal FluxBilling.app
 
 # --- distro image + boot endpoints ---
@@ -76,19 +76,16 @@ set portal FluxBilling.app
 # until that release is published it is the last third-party pin in the tree.
 set rel2204 22.04.5
 set rel2404 24.04.4
-set rel2510 25.10
 set rel2604 26.04
 set ubu_rel https://releases.ubuntu.com
 # The ISO is fetched by casper inside the initrd, never by iPXE -> https.
 set img2204 ${ubu_rel}/${rel2204}/ubuntu-${rel2204}-live-server-amd64.iso
 set img2404 ${ubu_rel}/${rel2404}/ubuntu-${rel2404}-live-server-amd64.iso
-set img2510 ${ubu_rel}/${rel2510}/ubuntu-${rel2510}-live-server-amd64.iso
 set img2604 ${ubu_rel}/${rel2604}/ubuntu-${rel2604}-live-server-amd64.iso
 # Kernel + initrd, fetched by iPXE. Official Canonical netboot images, from
 # the same compose as the ISO above. http:// deliberately - see the policy
 # note: iPXE cannot verify TLS without leaning on ca.ipxe.org over plain HTTP.
 set boot2404 http://releases.ubuntu.com/${rel2404}/netboot/amd64
-set boot2510 http://releases.ubuntu.com/${rel2510}/netboot/amd64
 set boot2604 http://releases.ubuntu.com/${rel2604}/netboot/amd64
 # TODO: replace with the extracted-and-signed 22.04.5 casper images once the
 # first boot-* release is cut; this is the only non-official source left.
@@ -469,7 +466,6 @@ set ag_live live.password=${rootpw}
 menu ${app_name} v${app_ver}   ${hostnm}   ${ip}/${plen} gw ${gwip}   ${mode_lbl}
 item toggle_mode Install mode: ${mode_seg}
 item ubu2604 Ubuntu 26.04 LTS
-item ubu2510 Ubuntu 25.10
 item ubu2404 Ubuntu 24.04 LTS
 item ubu2204 Ubuntu 22.04 LTS
 item ubu2004 Ubuntu 20.04 LTS
@@ -506,11 +502,6 @@ goto os_pick
 # the kernel needs a per-release name.
 :ubu2604
 set rtag 2604
-set kname linux
-goto boot_casper
-
-:ubu2510
-set rtag 2510
 set kname linux
 goto boot_casper
 

@@ -7,7 +7,7 @@
 # initramfs unpack (this is where the real-hardware "Cannot open root
 # device" panic came from).
 #
-# REL selects the entry: 2404 (default), 2510, 2604.
+# REL selects the entry: 2404 (default), 2604.
 # .cache/${REL}-vmlinuz + ${REL}-initrd are fetched (and refreshed) HERE,
 # from the OFFICIAL Canonical netboot tree pinned in the menu: a version
 # stamp ties the cache to `set rel<REL>` in fluxbilling.ipxe, so a
@@ -20,8 +20,7 @@ set -euo pipefail
 REL=${REL:-2404}
 case $REL in
   2604) ARROWS='' ;;                    # u2604 is the menu default
-  2510) ARROWS='\033[B' ;;
-  2404) ARROWS='\033[B\033[B' ;;
+  2404) ARROWS='\033[B' ;;
   *) echo "unsupported REL=$REL"; exit 1 ;;
 esac
 # The boot base for this release, straight from the menu script (variable is

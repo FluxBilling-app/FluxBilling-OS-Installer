@@ -44,7 +44,7 @@ jobs:
         run: |
           docker run --rm --platform linux/amd64 \
             $( [ -e /dev/kvm ] && echo --device /dev/kvm ) \
-            -v "$PWD":/w -e ISO=/w/FluxBilling-OS-Installer_v1.0.iso -e LOGDIR=/w/test-logs \
+            -v "$PWD":/w -e ISO=/w/FluxBilling-OS-Installer_v1.1.iso -e LOGDIR=/w/test-logs \
             fluxbilling-builder bash /w/src/qemu-test.sh
 
       - name: E2E initrd-injection + kernel-exec test

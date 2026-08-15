@@ -27,7 +27,7 @@ trap '' PIPE
 
 WORK=${WORK:-/var/tmp/flux-matrix}
 LOGDIR=${LOGDIR:-$WORK/logs}
-ISO=${ISO:-$PWD/FluxBilling-OS-Installer_v1.0.iso}
+ISO=${ISO:-$PWD/FluxBilling-OS-Installer_v1.1.iso}
 PASS=${PASS:-Passw0rd123}
 DISK_GB=${DISK_GB:-20}
 # Multiplies every per-entry timeout. The table below is sized for KVM; an
@@ -101,29 +101,28 @@ MEMBUDGET_MB=${MEMBUDGET_MB:-$(awk '/MemTotal/ {printf "%d", $2/1024*0.7}' /proc
 # after it. That is the intended signal, not a harness bug.
 MATRIX='
 ubu2604  Ubuntu-26.04   0   8192  5400
-ubu2510  Ubuntu-25.10   1   8192  5400
-ubu2404  Ubuntu-24.04   2   8192  5400
-ubu2204  Ubuntu-22.04   3   8192  5400
-ubu2004  Ubuntu-20.04   4   1536  7200
-ubu1804  Ubuntu-18.04   5   1536  7200
-deb13    Debian-13      6   1536  5400
-deb12    Debian-12      7   1536  5400
-deb11    Debian-11      8   1536  5400
-al10     AlmaLinux-10   9   4096  5400
-al9      AlmaLinux-9   10   4096  5400
-al8      AlmaLinux-8   11   4096  5400
-rk10     Rocky-10      12   4096  5400
-rk9      Rocky-9       13   4096  5400
-rk8      Rocky-8       14   4096  5400
-cs10     CentOS-10     15   4096  5400
-cs9      CentOS-9      16   4096  5400
-ol10     OracleLinux-10 17  4096  5400
-ol9      OracleLinux-9 18   4096  5400
-ol8      OracleLinux-8 19   4096  5400
-leap160  Leap-16.0     20   3072  5400
-leap156  Leap-15.6     21   2048  5400
-pve9     Proxmox-9     22   8192  5400
-pve8     Proxmox-8     23   8192  5400
+ubu2404  Ubuntu-24.04    1   8192  5400
+ubu2204  Ubuntu-22.04    2   8192  5400
+ubu2004  Ubuntu-20.04    3   1536  7200
+ubu1804  Ubuntu-18.04    4   1536  7200
+deb13    Debian-13       5   1536  5400
+deb12    Debian-12       6   1536  5400
+deb11    Debian-11       7   1536  5400
+al10     AlmaLinux-10    8   4096  5400
+al9      AlmaLinux-9    9   4096  5400
+al8      AlmaLinux-8   10   4096  5400
+rk10     Rocky-10      11   4096  5400
+rk9      Rocky-9       12   4096  5400
+rk8      Rocky-8       13   4096  5400
+cs10     CentOS-10     14   4096  5400
+cs9      CentOS-9      15   4096  5400
+ol10     OracleLinux-10 16  4096  5400
+ol9      OracleLinux-9 17   4096  5400
+ol8      OracleLinux-8 18   4096  5400
+leap160  Leap-16.0     19   3072  5400
+leap156  Leap-15.6     20   2048  5400
+pve9     Proxmox-9     21   8192  5400
+pve8     Proxmox-8     22   8192  5400
 '
 
 ENTRIES=${ENTRIES:-$(awk 'NF {print $1}' <<<"$MATRIX")}

@@ -54,7 +54,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: iso
-          path: FluxBilling-OS-Installer_v1.0.iso
+          path: FluxBilling-OS-Installer_v1.1.iso
           retention-days: 1
 
   # The matrix is spelled out rather than generated: a workflow-level `matrix`
@@ -66,12 +66,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     strategy:
-      fail-fast: false      # one broken mirror must not hide the other 23 results
-      max-parallel: 24
+      fail-fast: false      # one broken mirror must not hide the other 22 results
+      max-parallel: 23
       matrix:
         # ol* and pve* boot from the repo's boot-* release and FAIL with a
         # fetch error until that release is cut - expected red, not noise.
-        entry: [ubu2604, ubu2510, ubu2404, ubu2204, ubu2004, ubu1804,
+        entry: [ubu2604, ubu2404, ubu2204, ubu2004, ubu1804,
                 deb13, deb12, deb11,
                 al10, al9, al8, rk10, rk9, rk8, cs10, cs9,
                 ol10, ol9, ol8,
@@ -116,7 +116,7 @@ jobs:
           # empty the same, so a push run is a BIOS run.
           ENTRIES='${{ matrix.entry }}' \
           UEFI='${{ inputs.firmware == 'uefi' && '1' || '0' }}' \
-          ISO="$PWD/FluxBilling-OS-Installer_v1.0.iso" \
+          ISO="$PWD/FluxBilling-OS-Installer_v1.1.iso" \
           WORK=/mnt/flux LOGDIR="$PWD/matrix-logs" \
           MEMBUDGET_MB=12288 \
             bash src/install-matrix.sh

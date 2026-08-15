@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build FluxBilling-OS-Installer_v1.0.iso — tiny iPXE provisioning image (~2.4 MB).
+# Build FluxBilling-OS-Installer_v1.1.iso — tiny iPXE provisioning image (~2.4 MB).
 #
 # The ISO carries ONLY iPXE + menu + config seeds. Kernels, initrds and
 # install ISOs are fetched at boot time over the data NIC the operator
@@ -133,15 +133,15 @@ docker run --rm --platform linux/amd64 -v "$PWD":/w "$BUILDER" bash -exc '
   make -j"$(nproc)" bin-x86_64-pcbios/ipxe.lkrn EMBED="$EMBEDLIST" CERT="$TRUSTLIST" TRUST="$TRUSTLIST"
   make -j"$(nproc)" bin-x86_64-efi/ipxe.efi EMBED="$EMBEDLIST" CERT="$TRUSTLIST" TRUST="$TRUSTLIST"
 
-  ./util/genfsimg -o /w/FluxBilling-OS-Installer_v1.0.iso bin-x86_64-pcbios/ipxe.lkrn bin-x86_64-efi/ipxe.efi
+  ./util/genfsimg -o /w/FluxBilling-OS-Installer_v1.1.iso bin-x86_64-pcbios/ipxe.lkrn bin-x86_64-efi/ipxe.efi
 
   # genfsimg only gets a hybrid MBR from an isohybrid post-pass that is
   # guarded by "isohybrid --version" and SKIPPED SILENTLY when syslinux-utils
   # is missing (see builder.Dockerfile) - the ISO then boots over virtual
   # media but is dead when dd-ed to a USB stick. Fail the build instead.
-  sig=$(tail -c +511 /w/FluxBilling-OS-Installer_v1.0.iso | head -c2 | od -An -tx1 | tr -d " ")
+  sig=$(tail -c +511 /w/FluxBilling-OS-Installer_v1.1.iso | head -c2 | od -An -tx1 | tr -d " ")
   [ "$sig" = "55aa" ] || { echo "FATAL: ISO lacks the hybrid-MBR boot signature (got: $sig)" >&2; exit 1; }
 
-  ls -la /w/FluxBilling-OS-Installer_v1.0.iso
+  ls -la /w/FluxBilling-OS-Installer_v1.1.iso
 '
-echo "Done: FluxBilling-OS-Installer_v1.0.iso"
+echo "Done: FluxBilling-OS-Installer_v1.1.iso"

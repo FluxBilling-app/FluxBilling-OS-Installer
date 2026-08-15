@@ -21,7 +21,7 @@ set -uo pipefail
 # infrastructure hiccup.
 trap '' PIPE
 
-ISO=${ISO:-/iso/FluxBilling-OS-Installer_v1.0.iso}
+ISO=${ISO:-/iso/FluxBilling-OS-Installer_v1.1.iso}
 LOGDIR=${LOGDIR:-/tmp}; mkdir -p "$LOGDIR"
 [ -s "$ISO" ] || { echo "FATAL: ISO not found or empty: $ISO"; exit 1; }
 fail=0

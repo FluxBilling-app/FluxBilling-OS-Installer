@@ -19,7 +19,7 @@
   <img src="https://img.shields.io/badge/engine-iPXE-blue">
   <img src="https://img.shields.io/badge/image-~3%20MB-brightgreen">
   <img src="https://img.shields.io/badge/boot-BIOS%20%2B%20UEFI-orange">
-  <img src="https://img.shields.io/badge/OS%20entries-24-purple">
+  <img src="https://img.shields.io/badge/OS%20entries-23-purple">
   <img src="https://img.shields.io/badge/license-GPL--2.0--or--later-blue">
 </p>
 
@@ -45,7 +45,7 @@ generated *on the machine itself* from your answers.
 
 | Family | Versions | Automated config |
 |---|---|---|
-| Ubuntu (subiquity) | 26.04 LTS, 25.10, 24.04 LTS, 22.04 LTS | NoCloud seed generated at boot |
+| Ubuntu (subiquity) | 26.04 LTS, 24.04 LTS, 22.04 LTS | NoCloud seed generated at boot |
 | Ubuntu (d-i) | 20.04, 18.04 | preseed + cmdline |
 | Debian | 13, 12, 11 | preseed + cmdline |
 | AlmaLinux | 10, 9, 8 | kickstart (`%pre` from cmdline) |
@@ -69,19 +69,19 @@ answers (password as a SHA-512 hash, never plaintext at rest).
 
 ## Quick start
 
-1. Grab `FluxBilling-OS-Installer_v1.0.iso` from
+1. Grab `FluxBilling-OS-Installer_v1.1.iso` from
    [Releases](../../releases) — or [build it](#building).
 2. Attach via virtual media — or flash a USB stick:
 
    ```sh
    # macOS - replace diskN with the USB stick
    diskutil unmountDisk /dev/diskN
-   sudo dd if=FluxBilling-OS-Installer_v1.0.iso of=/dev/rdiskN bs=1m
+   sudo dd if=FluxBilling-OS-Installer_v1.1.iso of=/dev/rdiskN bs=1m
    ```
 
    ```sh
    # Linux - replace sdX with the USB stick
-   sudo dd if=FluxBilling-OS-Installer_v1.0.iso of=/dev/sdX bs=1M status=progress conv=fsync
+   sudo dd if=FluxBilling-OS-Installer_v1.1.iso of=/dev/sdX bs=1M status=progress conv=fsync
    ```
 
    **Windows** — Windows has no `dd`. Use
@@ -159,7 +159,7 @@ anything:
   load it. No practical fix exists for a custom iPXE build; disable Secure
   Boot for the install, and re-enable it afterwards if the installed OS ships
   a signed shim (Ubuntu, Debian, Alma, Rocky and Leap all do).
-- Tested end-to-end: **all 24 automated entries, under both legacy BIOS
+- Tested end-to-end: **all automated entries (24 at the time, including the since-removed 25.10), under both legacy BIOS
   (SeaBIOS) and UEFI (OVMF)** — each install ran to completion in KVM, the
   guest rebooted off its own disk and accepted a root SSH login with the
   menu-typed password, with hostname, static IP and os-release asserted
@@ -218,7 +218,7 @@ plain HTTP, with no dependency on anyone else's PKI.
 Needs Docker. Everything is pinned:
 
 ```sh
-./build.sh        # outputs FluxBilling-OS-Installer_v1.0.iso
+./build.sh        # outputs FluxBilling-OS-Installer_v1.1.iso
 ```
 
 First run bakes the builder image (~10 min); every rebuild after that is ~15
@@ -291,5 +291,5 @@ any of them, nor by the iPXE project or netboot.xyz.
 ---
 
 <p align="center">
-  <i>FluxBilling OS Installer v1.0 — powered by <a href="https://ipxe.org">iPXE</a>.</i>
+  <i>FluxBilling OS Installer v1.1 — powered by <a href="https://ipxe.org">iPXE</a>.</i>
 </p>
