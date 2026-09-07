@@ -76,7 +76,7 @@ set portal FluxBilling.app
 # until that release is published it is the last third-party pin in the tree.
 set rel2204 22.04.5
 set rel2404 24.04.4
-set rel2604 26.04
+set rel2604 26.04.1
 set ubu_rel https://releases.ubuntu.com
 # The ISO is fetched by casper inside the initrd, never by iPXE -> https.
 set img2204 ${ubu_rel}/${rel2204}/ubuntu-${rel2204}-live-server-amd64.iso

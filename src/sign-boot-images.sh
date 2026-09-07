@@ -45,7 +45,7 @@ read -r -d '' MANIFEST <<'EOF' || true
 # ISO the menu boots, so they cannot be out of step with it.
 ubuntu-22.04  iso:https://releases.ubuntu.com/22.04.5/ubuntu-22.04.5-live-server-amd64.iso  iso:
 ubuntu-24.04  https://releases.ubuntu.com/24.04.4/netboot/amd64/linux  https://releases.ubuntu.com/24.04.4/netboot/amd64/initrd
-ubuntu-26.04  https://releases.ubuntu.com/26.04/netboot/amd64/linux  https://releases.ubuntu.com/26.04/netboot/amd64/initrd
+ubuntu-26.04  https://releases.ubuntu.com/26.04.1/netboot/amd64/linux  https://releases.ubuntu.com/26.04.1/netboot/amd64/initrd
 ubuntu-20.04  https://archive.ubuntu.com/ubuntu/dists/focal-updates/main/installer-amd64/current/legacy-images/netboot/ubuntu-installer/amd64/linux  https://archive.ubuntu.com/ubuntu/dists/focal-updates/main/installer-amd64/current/legacy-images/netboot/ubuntu-installer/amd64/initrd.gz
 ubuntu-18.04  https://archive.ubuntu.com/ubuntu/dists/bionic-updates/main/installer-amd64/current/images/netboot/ubuntu-installer/amd64/linux       https://archive.ubuntu.com/ubuntu/dists/bionic-updates/main/installer-amd64/current/images/netboot/ubuntu-installer/amd64/initrd.gz
 debian-13     https://deb.debian.org/debian/dists/trixie/main/installer-amd64/current/images/netboot/debian-installer/amd64/linux    https://deb.debian.org/debian/dists/trixie/main/installer-amd64/current/images/netboot/debian-installer/amd64/initrd.gz
