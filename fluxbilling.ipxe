@@ -75,7 +75,7 @@ set portal FluxBilling.app
 # extracted from the official ISO instead - see src/sign-boot-images.sh - so
 # until that release is published it is the last third-party pin in the tree.
 set rel2204 22.04.5
-set rel2404 24.04.4
+set rel2404 24.04.5
 set rel2604 26.04
 set ubu_rel https://releases.ubuntu.com
 # The ISO is fetched by casper inside the initrd, never by iPXE -> https.
