@@ -38,6 +38,10 @@ generated *on the machine itself* from your answers.
 - **Tiny** — ~3 MB, attaches over IPMI virtual media in seconds.
 - **Zero-touch** — hostname, static IP and root password typed once.
 - **No PXE server, no DHCP** — static IP from the menu; works in any colo.
+  That holds for the installer image too, not just the installed system: the
+  Ubuntu seed carries a `network-config` so cloud-init configures the live
+  environment from the address you typed instead of falling back to DHCP and
+  waiting for a lease that is never coming.
 - **Manual mode** — one toggle boots the *same* installer interactively.
 - **BIOS + UEFI**, serial console (SOL) mirrored, /31 subnets supported.
 
@@ -69,19 +73,19 @@ answers (password as a SHA-512 hash, never plaintext at rest).
 
 ## Quick start
 
-1. Grab `FluxBilling-OS-Installer_v1.1.iso` from
+1. Grab `FluxBilling-OS-Installer_v1.5.iso` from
    [Releases](../../releases) — or [build it](#building).
 2. Attach via virtual media — or flash a USB stick:
 
    ```sh
    # macOS - replace diskN with the USB stick
    diskutil unmountDisk /dev/diskN
-   sudo dd if=FluxBilling-OS-Installer_v1.1.iso of=/dev/rdiskN bs=1m
+   sudo dd if=FluxBilling-OS-Installer_v1.5.iso of=/dev/rdiskN bs=1m
    ```
 
    ```sh
    # Linux - replace sdX with the USB stick
-   sudo dd if=FluxBilling-OS-Installer_v1.1.iso of=/dev/sdX bs=1M status=progress conv=fsync
+   sudo dd if=FluxBilling-OS-Installer_v1.5.iso of=/dev/sdX bs=1M status=progress conv=fsync
    ```
 
    **Windows** — Windows has no `dd`. Use
@@ -105,9 +109,14 @@ answers (password as a SHA-512 hash, never plaintext at rest).
 
 4. Review screen, fix any field, pick an OS. Done.
 
-The first OS-menu entry toggles **AUTOMATED** (answer files injected,
-zero-touch, watchable over SOL) and **MANUAL** (same installer, no answer
-file, driven by hand). `BOOTIF=01-<mac>` lets every installer find the boot
+The OS menu opens with two toggles. **Install mode** switches **AUTOMATED**
+(answer files injected, zero-touch) and **MANUAL** (same installer, no answer
+file, driven by hand). **Installer output** picks which console the installer
+UI actually draws on - **SOL** (serial, the automated default and what a
+headless node gives you) or **Video** (the iDRAC/iLO/VNC screen, the manual
+default). Kernel messages go to both either way, so a video console left on
+SOL shows dmesg, then nothing: that silence is the installer running
+elsewhere, not a hang. `BOOTIF=01-<mac>` lets every installer find the boot
 NIC by MAC, so there is no NIC-name guessing on any hardware.
 
 ## How it works
@@ -139,6 +148,53 @@ anything:
   probes every URL the menu fetches — generated from the menu itself by
   [src/menu-urls.sh](src/menu-urls.sh), never hand-copied — the way iPXE
   fetches it, and opens a bump PR when Ubuntu supersedes a pinned release.
+- **A pairing check, on every entry.** Each entry boots images from one
+  upstream path and then has the installer download a payload — an ISO, a
+  repo, an apt mirror — from another, and the two sides are refreshed on
+  different schedules. Ubuntu 24.04 showed what that costs: Canonical rebuilds
+  `<point>/netboot/` in place while the ISO beside it stays frozen, casper
+  found a UUID that did not match, unmounted the ISO it had just downloaded
+  and panicked onto `/dev/console` — the serial line in automated mode, so the
+  operator watching the video console saw nothing at all.
+  [src/boot-pairing-check.sh](src/boot-pairing-check.sh) now asserts the
+  pairing for all 23 entries on every push: textually where both halves come
+  from one menu variable (Debian, Alma/Rocky/CentOS, Leap 15.6), and by
+  content where they do not — the netboot kernel must be one of the kernels
+  inside the exact ISO casper downloads, the Leap 16 loader kernel must be the
+  one inside the Agama ISO, the Proxmox ISO the menu boots must be the one the
+  signing manifest extracted from. An entry with no rule fails the build, so
+  the next distro cannot ship unverified, and
+  [src/pairing-selftest.sh](src/pairing-selftest.sh) proves the gate still
+  rejects each breakage it was written for. The Ubuntu entries ride the
+  codename alias (`noble/`, `resolute/` plus `ubuntu-<ver>-latest-…iso`),
+  which upstream rebuilds as one compose; 22.04 has no codename netboot tree,
+  so it keeps a pin frozen on both halves.
+- **A readable failure.** If an installer does stop, it says so on every
+  console the machine has. Stock casper prints its reason and opens its debug
+  shell on a single console — the serial line in automated mode — which is how
+  a real failure looked like a frozen screen on an iDRAC. A `panic()` wrapper
+  injected as `/conf/param.conf` (with a matching dracut emergency hook)
+  prints a labelled **INSTALL FAILED** banner with the reason to the video
+  console *and* the serial line, states that nothing was written to the target
+  disk, and then holds: it never reboots, and it ignores a `panic=` boot
+  argument so a wedge cannot turn into a silent reboot loop. Resetting the
+  server is what returns you to the boot menu — iPXE is gone once a kernel is
+  running, so there is no way back to it from inside the installer.
+  [src/console-ux-test.sh](src/console-ux-test.sh) asserts all of that,
+  including the case that caused the original bug: only `ttyS0` registered,
+  banner still reaches the video console.
+- **A visible, fast download.** casper fetches a 3–4 GB ISO with `wget`, whose
+  progress bar goes to one console — so the other one shows nothing for as long
+  as the fetch takes, which is how a working install gets power-cycled by hand.
+  A watcher injected as part of `/conf/param.conf` mirrors the download to the
+  consoles `wget` is not drawing on. The same hook also picks where to fetch
+  from: [src/flux-mirror-pick](src/flux-mirror-pick) gives the origin a
+  two-second trial and, if it is slow, races Ubuntu mirrors and moves to the
+  fastest one that beats it by a clear margin. A mirror copy is mounted with
+  casper's own `matches_uuid` check restored, so a mirror that is a different
+  compose is rejected and the origin is used instead — measured on a customer
+  box whose unmetered 10 Gbps port still only pulled 0.8 MB/s from
+  releases.ubuntu.com.
 
 ## Requirements & limits
 
@@ -217,7 +273,7 @@ plain HTTP, with no dependency on anyone else's PKI.
 Needs Docker. Everything is pinned:
 
 ```sh
-./build.sh        # outputs FluxBilling-OS-Installer_v1.1.iso
+./build.sh        # outputs FluxBilling-OS-Installer_v1.5.iso
 ```
 
 First run bakes the builder image (~10 min); every rebuild after that is ~15
@@ -291,5 +347,5 @@ any of them, nor by the iPXE project or netboot.xyz.
 ---
 
 <p align="center">
-  <i>FluxBilling OS Installer v1.1 — powered by <a href="https://ipxe.org">iPXE</a>.</i>
+  <i>FluxBilling OS Installer v1.5 — powered by <a href="https://ipxe.org">iPXE</a>.</i>
 </p>
