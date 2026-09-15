@@ -197,6 +197,13 @@ chroot /mnt systemctl enable flux-scrub.service
     </user>
   </users>
   <software>
+    <!-- No install pulls updates. AutoYaST will happily run an online update
+         mid-install when the profile lets it; on a slow link that turns a
+         local-media install into a package download, and it makes two servers
+         built weeks apart come out different. Patching is the installed
+         system's job, not the installer's. -->
+    <do_online_update config:type="boolean">false</do_online_update>
+    <install_recommended config:type="boolean">false</install_recommended>
     <patterns config:type="list">
       <pattern>base</pattern>
     </patterns>

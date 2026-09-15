@@ -20,11 +20,13 @@ prereqs)
        ;;
 esac
 
-. /scripts/casper-functions
+# ${flux_*} overrides exist only so src/seed-test.sh can drive this without a
+# live boot; in the initramfs they are the real paths.
+. "${flux_casper_functions:-/scripts/casper-functions}"
 
 log_begin_msg "$DESCRIPTION"
 
-C=$(cat /proc/cmdline)
+C=$(cat "${flux_cmdline:-/proc/cmdline}")
 
 # MANUAL mode: the menu drops the `autoinstall` keyword. Bail out WITHOUT
 # writing the NoCloud seed - subiquity treats any autoinstall: key in
@@ -52,11 +54,20 @@ IPCFG=$(zget ip)
 IP=$(echo "$IPCFG" | cut -d: -f1)
 GW=$(echo "$IPCFG" | cut -d: -f3)
 MAC=$(zget BOOTIF | sed 's/^01-//' | tr - :)
+# ip=<ip>::<gw>:<mask>:<host>::none:<ns1>:<ns2> - counting the empty fields,
+# that puts the resolvers at 8 and 9. They are what the LIVE environment should
+# resolve with; the installed system gets its own list from the autoinstall
+# network stanza below.
+NS1=$(echo "$IPCFG" | cut -d: -f8)
+NS2=$(echo "$IPCFG" | cut -d: -f9)
+[ -n "$NS1" ] || NS1=8.8.8.8
+[ -n "$NS2" ] || NS2=1.1.1.1
 
 # escape for sed replacement
 HS=$(echo "$H" | sed 's/[\/&]/\\&/g')
 
-D=/root/var/lib/cloud/seed/nocloud
+FLUXROOT=${flux_root:-/root}
+D=$FLUXROOT/var/lib/cloud/seed/nocloud
 mkdir -p "$D"
 
 cat > "$D/meta-data" <<EOF
@@ -72,10 +83,29 @@ autoinstall:
   refresh-installer:
     update: no
   apt:
-    disable_suites: [security]
-    primary:
-      - arches: [default]
-        uri: http://archive.ubuntu.com/ubuntu/
+    # No install ever pulls updates: the base system comes out of the ISO's
+    # own pool, and every pocket that could add a newer package mid-install is
+    # switched off. It makes installs deterministic (two servers built a month
+    # apart get the same bits) and, on a slow path, it is the difference
+    # between installing from local media and dragging packages over a
+    # 6 Mbit/s link. The suites are put back on the installed system by a
+    # late-command below - frozen during the install, normal afterwards.
+    disable_suites: [security, updates, backports, proposed]
+    # geoip picks the country mirror (ro.archive..., de.archive..., ...)
+    # instead of the single global host. The old hardcoded
+    # primary: http://archive.ubuntu.com/ubuntu/ was the slowest possible
+    # choice on exactly the networks this product runs on - the box that
+    # pulled the ISO at 0.87 MB/s from Canonical would have fetched every
+    # package over that same path, and kept it in sources.list forever.
+    geoip: true
+    # If the chosen mirror is unusable, install from the ISO rather than
+    # sitting on a dead connection: the live image already carries everything
+    # a default server install needs.
+    fallback: offline-install
+  # Third-party driver detection reaches out to the network mid-install and
+  # buys nothing on a server with Intel NICs and no GPU.
+  drivers:
+    install: false
   ssh:
     install-server: true
     allow-pw: true
@@ -127,6 +157,25 @@ autoinstall:
       curtin in-target --target=/target -- bash -c 'P=$(tr " " "\n" < /proc/cmdline | sed -n "s/^fluxpass=//p" | head -n1); if [ -n "$P" ]; then getent passwd user >/dev/null || useradd -m -s /bin/bash -G sudo user; printf "root:%s\nuser:%s\n" "$P" "$P" | chpasswd; else echo "FLUX: no fluxpass= on the kernel command line - root and user stay LOCKED." >&2; fi'
     - |
       curtin in-target --target=/target -- sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+    # Pin the installed system's datasource list. Left alone, cloud-init on a
+    # bare-metal box probes for EC2/Azure/GCE metadata on EVERY boot - it
+    # cannot know there is no cloud under it - and each boot stalls in
+    # "Job cloud-init-network.service/start running (4min 51s / 5min 6s)"
+    # before giving up. Measured on a freshly installed server on 2026-09-15.
+    # NoCloud first (subiquity leaves a seed in the target, which is what runs
+    # the first-boot scrub above), None as the terminator: both are local, so
+    # the search ends immediately and nothing waits on a network that will
+    # never answer. cloud-init still runs - this only stops it guessing.
+    - |
+      curtin in-target --target=/target -- sh -c 'mkdir -p /etc/cloud/cloud.cfg.d && printf "# FluxBilling: bare metal - do not probe cloud metadata endpoints\ndatasource_list: [ NoCloud, None ]\n" > /etc/cloud/cloud.cfg.d/90-flux-datasource.cfg'
+    # Put the pockets back for the INSTALLED system. disable_suites above is
+    # about the install, not about shipping servers that can never receive a
+    # security fix - without this the box would sit on release-day packages
+    # forever. Handles both layouts: deb822 (24.04+) keeps suites on a
+    # Suites: line, older releases comment the deb lines out. The mirror URI
+    # is left exactly as the installer chose it.
+    - |
+      curtin in-target --target=/target -- sh -c 'C=$(. /etc/os-release; echo "$VERSION_CODENAME"); F=/etc/apt/sources.list.d/ubuntu.sources; if [ -s "$F" ]; then sed -i -E "s|^Suites:.*|Suites: $C $C-updates $C-security $C-backports|" "$F"; else sed -i -E "s|^# *(deb .*(-updates|-security|-backports).*)|\\1|" /etc/apt/sources.list; fi'
     - |
       curtin in-target --target=/target -- sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT="quiet splash"/GRUB_CMDLINE_LINUX_DEFAULT="quiet splash net.ifnames=0 biosdevname=0"/' /etc/default/grub
     - |
@@ -156,5 +205,46 @@ cat >> "$D/user-data" <<ZEOF
           addresses: [8.8.8.8, 1.1.1.1]
 ZEOF
 fi
+
+# --- network for the LIVE environment ---------------------------------------
+# Without this file cloud-init has no network config for the installer image
+# itself, falls back to DHCP on the boot NIC, and on a static-only network
+# there is nothing to answer: cloud-init-network.service then sits in
+# "start running (Xmin / no limit)" forever and the install never begins.
+# Observed in the field on 2026-09-15 at 9 minutes and counting; never seen in
+# the matrix because QEMU's user-mode network always answers DHCP, so every
+# automated run had a lease handed to it.
+#
+# NoCloud reads network-config from the seed directory, so the live image gets
+# the same static address the operator typed into the menu - the one the
+# initramfs is already using.
+if [ -n "$IP" ] && [ -n "$CIDR" ] && [ -n "$GW" ] && [ -n "$MAC" ]; then
+cat > "$D/network-config" <<ZEOF
+version: 2
+ethernets:
+  fluxnic:
+    match:
+      macaddress: "$MAC"
+    dhcp4: false
+    dhcp6: false
+    addresses: [ $IP/$CIDR ]
+    routes:
+      - to: default
+        via: $GW
+    nameservers:
+      addresses: [ $NS1, $NS2 ]
+ZEOF
+fi
+
+# Backstop: even with the file above, cloud-init's network stage has no
+# TimeoutStartSec of its own - "no limit" is systemd quoting the unit. A stage
+# that cannot finish should fail and let the boot continue (the installer then
+# comes up interactively, which is visible) rather than hang a server nobody
+# can see. Five minutes is far longer than the stage takes when it works.
+mkdir -p "$FLUXROOT/etc/systemd/system/cloud-init-network.service.d"
+cat > "$FLUXROOT/etc/systemd/system/cloud-init-network.service.d/99-flux-timeout.conf" <<'ZEOF'
+[Service]
+TimeoutStartSec=300
+ZEOF
 
 log_end_msg
