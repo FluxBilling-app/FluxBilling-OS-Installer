@@ -51,6 +51,28 @@ getvar() { # getvar <name> -> value of `set <name> ...`, must exist
   printf '%s\n' "$v"
 }
 
+# Resolve EVERY ${name} against the menu's own `set` lines, not a hand-listed
+# few: the casper block used to special-case ${relNNNN} and rebuild the ISO URL
+# from an assumed host+filename, so when the entries moved to the codename
+# alias (`${ubu_rel}/${code2404}/ubuntu-${ver2404}-latest-...`) this script
+# emitted a URL the menu never fetches. emit() still rejects anything left
+# unresolved, so a var this cannot reach is a hard failure, never a guess.
+expand() { # expand <string>
+  local v=$1 name sub i=0
+  while [ "$i" -lt 12 ]; do
+    case $v in
+      *'${'*) ;;
+      *) break ;;
+    esac
+    name=${v#*\$\{}; name=${name%%\}*}
+    sub=$(sed -n "s/^set $name //p" "$MENU" | head -n1)
+    [ -n "$sub" ] || die "cannot resolve \${$name} (no 'set $name' line)"
+    v=${v//\$\{$name\}/$sub}
+    i=$((i + 1))
+  done
+  printf '%s\n' "$v"
+}
+
 # --- Ubuntu casper (22.04+) -------------------------------------------------
 # DISCOVER the releases from the menu - never hardcode the list. A hardcoded
 # set silently ignores a newly added entry, and the watchdog would then report
@@ -62,10 +84,8 @@ casper_rels=$(sed -n 's/^set rel\([0-9]\{4\}\) .*/\1/p' "$MENU")
 n_cas=0
 for tag in $casper_rels; do
   rel=$(getvar "rel$tag")
-  boot=$(getvar "boot$tag")
-  # boot* is written in terms of ${relNNNN}; resolve that one nested reference
-  # rather than reconstructing the URL from an assumed host.
-  boot=${boot//\$\{rel$tag\}/$rel}
+  boot=$(expand "$(getvar "boot$tag")")
+  img=$(expand "$(getvar "img$tag")")
   # Canonical's netboot tree calls the kernel "linux"; the 22.04 GitHub build
   # calls it "vmlinuz" (see :ubu2204 / :boot_casper).
   case "$boot" in
@@ -74,11 +94,33 @@ for tag in $casper_rels; do
   esac
   emit ipxe "$boot/$kname"
   emit ipxe "$boot/initrd"
-  emit bulk "https://releases.ubuntu.com/$rel/ubuntu-$rel-live-server-amd64.iso"
+  # The ISO the initrd downloads - read from img<tag>, never rebuilt from
+  # $rel: 24.04/26.04 boot the codename -latest- alias so that ISO and the
+  # netboot images above stay one compose (see the img*/boot* note in the
+  # menu), and a reconstructed point-release URL would have the watchdog
+  # probing an image nothing boots.
+  emit bulk "$img"
   # :casper_fallback's target for this release - diagnostic, see the header.
   emit alt "http://old-releases.ubuntu.com/releases/$rel/netboot/amd64/$kname"
   n_cas=$((n_cas + 1))
 done
+# The ISO mirrors src/flux-mirror-pick races at boot. Diagnostic rows: a dead
+# mirror costs nothing (the picker falls back to the origin it just measured),
+# but a list where EVERY entry has rotted silently turns the feature off, and
+# nothing else would notice. Read from the picker itself, never duplicated.
+mir_file=src/flux-mirror-pick
+if [ -r "$mir_file" ]; then
+  mir_bases=$(sed -n '/^FLUX_MIRRORS="/,/"$/p' "$mir_file" \
+              | sed -e 's/^FLUX_MIRRORS="//' -e 's/"$//' | grep '^http')
+  [ -n "$mir_bases" ] || die "cannot parse FLUX_MIRRORS out of $mir_file"
+  for tag in $casper_rels; do
+    series=$(getvar "rel$tag" | cut -d. -f1,2)
+    for b in $mir_bases; do
+      emit alt "$b/$series/"
+    done
+  done
+fi
+
 # Every casper release must have a matching :ubu<tag> menu entry, and vice
 # versa - otherwise one of the two lists has grown without the other.
 n_items=$(grep -c '^set rtag ' "$MENU")

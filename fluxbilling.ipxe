@@ -31,7 +31,7 @@ set acc ${cl_blu}
 set err ${b_on}${cl_wht}
 
 set app_name Flux Installer
-set app_ver 1.1
+set app_ver 1.5
 set portal FluxBilling.app
 
 # --- distro image + boot endpoints ---
@@ -64,11 +64,36 @@ set portal FluxBilling.app
 # Hence the distro vars below are stored SCHEME-LESS and the scheme is written
 # at each use site. Keep it that way when adding a distro.
 #
-# Ubuntu casper: ONE version string per release drives everything. Canonical
-# publishes the netboot kernel/initrd under the SAME releases.ubuntu.com
-# directory as the ISO, so deriving both from ${rel*} makes kernel/ISO skew
-# structurally impossible - there is no second pin to keep in sync any more.
-# Bumping a point release is now a single edit here.
+# Ubuntu casper: the kernel/initrd and the ISO must come out of the SAME
+# compose, and sharing a directory name does NOT give you that. Canonical
+# REBUILDS releases.ubuntu.com/<point>/netboot/amd64/ in place whenever the
+# series kernel moves, while ubuntu-<point>-live-server-amd64.iso beside it
+# stays frozen at release day. Measured 2026-09-15: the 24.04.4 netboot tree
+# was stamped 2026-09-09 and carried 7.0.0-31-generic; the 24.04.4 ISO beside
+# it 2026-02-10, with 6.8.0-100-generic. Two failures fall out of that skew:
+#
+#   - casper's matches_uuid() compares /conf/uuid.conf inside the initrd with
+#     the ISO's .disk/casper-uuid* files. On a mismatch it UNMOUNTS the ISO it
+#     just downloaded and panics "Unable to find a live file system on the
+#     network" - on /dev/console, which in AUTOMATED mode is the serial line,
+#     so an operator watching the video console sees the loop0 attach and then
+#     nothing at all, forever. That is the field report this block exists for.
+#   - after switch_root the running kernel is the netboot one while
+#     /lib/modules inside the squashfs belongs to the ISO's kernel, so every
+#     module the initrd has not already loaded is simply missing.
+#
+# The pair upstream DOES keep in step is the codename tree: /<codename>/
+# netboot/amd64/ and /<codename>/ubuntu-<ver>-latest-live-server-amd64.iso are
+# rebuilt together - that ISO name is the one casper itself offers when a
+# netboot lands without url=. Verified on 2026-09-15: resolute netboot
+# 7.0.0-30 == ISO casper/vmlinuz 7.0.0-30, uuid f65b0304 both sides; noble
+# netboot 7.0.0-31 == ISO casper/hwe-vmlinuz 7.0.0-31, uuid fc54d02b both
+# sides. src/boot-pairing-check.sh asserts exactly that pairing and CI runs it,
+# so the next time upstream moves one half the build fails instead of a server
+# hanging on a black console.
+#
+# ${rel*} stays: it names the pinned point release :casper_fallback drops to on
+# old-releases, and 22.04 still pins there directly.
 #
 # 22.04.5 is the exception: it predates the netboot/ directory, which 404s for
 # that release (and for every /22.04/ variant). Its kernel/initrd have to be
@@ -77,16 +102,24 @@ set portal FluxBilling.app
 set rel2204 22.04.5
 set rel2404 24.04.4
 set rel2604 26.04
+set ver2404 24.04
+set ver2604 26.04
+set code2404 noble
+set code2604 resolute
 set ubu_rel https://releases.ubuntu.com
 # The ISO is fetched by casper inside the initrd, never by iPXE -> https.
+# 24.04/26.04 ride the codename alias so the ISO and the netboot images below
+# always come from one compose; 22.04 has no codename netboot tree at all
+# (jammy/netboot/ 404s), so it keeps its frozen point-release pin - both halves
+# of that pair are frozen, so it cannot skew either.
 set img2204 ${ubu_rel}/${rel2204}/ubuntu-${rel2204}-live-server-amd64.iso
-set img2404 ${ubu_rel}/${rel2404}/ubuntu-${rel2404}-live-server-amd64.iso
-set img2604 ${ubu_rel}/${rel2604}/ubuntu-${rel2604}-live-server-amd64.iso
+set img2404 ${ubu_rel}/${code2404}/ubuntu-${ver2404}-latest-live-server-amd64.iso
+set img2604 ${ubu_rel}/${code2604}/ubuntu-${ver2604}-latest-live-server-amd64.iso
 # Kernel + initrd, fetched by iPXE. Official Canonical netboot images, from
 # the same compose as the ISO above. http:// deliberately - see the policy
 # note: iPXE cannot verify TLS without leaning on ca.ipxe.org over plain HTTP.
-set boot2404 http://releases.ubuntu.com/${rel2404}/netboot/amd64
-set boot2604 http://releases.ubuntu.com/${rel2604}/netboot/amd64
+set boot2404 http://releases.ubuntu.com/${code2404}/netboot/amd64
+set boot2604 http://releases.ubuntu.com/${code2604}/netboot/amd64
 # TODO: replace with the extracted-and-signed 22.04.5 casper images once the
 # first boot-* release is cut; this is the only non-official source left.
 set boot2204 https://github.com/netbootxyz/ubuntu-squash/releases/download/22.04.5-be230164
@@ -186,6 +219,10 @@ console --x 800 --y 600 --picture logo.png ||
 imgargs preseed.cfg flux-preseed.cfg ||
 imgargs 99fluxseed scripts/casper-bottom/99fluxseed mode=755 mkdir=-1 ||
 imgargs param.conf conf/param.conf mkdir=-1 ||
+# The mirror picker param.conf sources once casper has parsed url= - see the
+# header of src/flux-mirror-pick for why a mirror copy is verified harder than
+# the origin is.
+imgargs flux-mirror-pick conf/flux-mirror-pick mkdir=-1 ||
 imgargs ks.cfg flux-ks.cfg ||
 imgargs autoinst.xml flux-autoinst.xml ||
 # First-boot credential scrub, copied into the target by preseed/late_command.
@@ -204,6 +241,11 @@ imgargs flux-scrub.service flux-scrub.service ||
 # way). inst.auto then reads file:///run/flux-agama.json.
 imgargs agama-leap16.json flux-agama.json ||
 imgargs 50-flux-agama.sh var/lib/dracut/hooks/pre-pivot/50-flux-agama.sh mode=755 mkdir=-1 ||
+# The failure banner's dracut half. param.conf carries the casper half (a
+# panic() wrapper); this one runs before dracut opens its emergency shell. An
+# initramfs that is not dracut never looks in this directory, so it costs the
+# other families nothing but the bytes.
+imgargs 50-flux-fail.sh var/lib/dracut/hooks/emergency/50-flux-fail.sh mode=755 mkdir=-1 ||
 # Proxmox automated-install hook. The one family whose installer offers no
 # answer-file argument at all on a stock ISO: unconfigured.sh only runs
 # proxmox-fetch-answer when /cdrom/auto-installer-mode.toml exists, a file
@@ -344,10 +386,17 @@ set flux_kargs fluxhost=${hostnm} fluxpass=${rootpw} fluxcidr=${plen}
 # drm_fb_helper worker that locks the framebuffer roughly 2.8s into early boot.
 # nomodeset on its own won't stop casper's initramfs from binding it, so the
 # module is hard-blacklisted as well and efifb/GOP drives the console instead.
-# Whichever console= comes LAST wins /dev/console (= where installer UIs draw),
-# so :os_pick appends ${con_kargs} to match the mode: automated lists ttyS0
-# last so it's watchable over SOL, manual lists tty0 last so the UI lands on
-# the iDRAC/video console.
+# Whichever console= comes LAST wins /dev/console - and /dev/console is where
+# the installer UI and every initramfs message go, and NOWHERE else. Kernel
+# printk still reaches both consoles, and that is the trap: a video console
+# that prints dmesg and then falls silent right after the install ISO
+# loop-mounts looks exactly like a hang, while the installer is in fact
+# running, on ttyS0, unwatched. So the console is a toggle of its own
+# (${conview}, :toggle_con) instead of a side effect of the install mode:
+# SOL puts ttyS0 last, Video puts tty0 last. The DEFAULT still follows the
+# mode - automated to SOL (headless nodes, and what src/install-matrix.sh
+# scrapes for its dead-install markers), manual to Video - and flipping the
+# toggle pins the choice for the rest of the session.
 set vga_kargs nomodeset modprobe.blacklist=mgag200
 # Static-network preseed for d-i, fed in under BOTH modes - the values are
 # already keyed in by hand; manual mode just keeps prompting for the rest.
@@ -414,7 +463,7 @@ isset ${amode} || set amode auto
 iseq ${amode} manual && goto kargs_manual ||
 set mode_lbl AUTOMATED
 set mode_seg [ Automated ] Manual
-set con_kargs console=tty0 console=ttyS0,115200n8
+isset ${convset} || set conview sol
 set ubu_auto autoinstall ds=nocloud ${flux_kargs}
 # locale/keyboard ride the CMDLINE, not only the preseed file: Ubuntu's
 # bionic/focal d-i asks "Select a language" BEFORE it reads preseed/file -
@@ -452,7 +501,7 @@ goto kargs_done
 :kargs_manual
 set mode_lbl MANUAL
 set mode_seg Automated [ Manual ]
-set con_kargs console=ttyS0,115200n8 console=tty0
+isset ${convset} || set conview video
 clear ubu_auto
 clear di_auto
 clear di_auto_flux
@@ -463,7 +512,10 @@ clear pv_auto
 set ag_live live.password=${rootpw}
 
 :kargs_done
+iseq ${conview} video && set con_kargs console=ttyS0,115200n8 console=tty0 || set con_kargs console=tty0 console=ttyS0,115200n8
+iseq ${conview} video && set con_seg SOL [ Video ] || set con_seg [ SOL ] Video
 menu ${app_name} v${app_ver}   ${hostnm}   ${ip}/${plen} gw ${gwip}   ${mode_lbl}
+item toggle_con Installer output: ${con_seg}
 item toggle_mode Install mode: ${mode_seg}
 item ubu2604 Ubuntu 26.04 LTS
 item ubu2404 Ubuntu 24.04 LTS
@@ -496,7 +548,22 @@ goto ${pick}
 iseq ${amode} manual && set amode auto || set amode manual
 goto os_pick
 
+# Pins ${conview} against the per-mode default above, so switching install
+# mode afterwards cannot silently move the installer UI off the screen the
+# operator is watching. item toggle_con sits ABOVE item toggle_mode on
+# purpose: src/install-matrix.sh derives the OS list from the items BETWEEN
+# toggle_mode and settings, and counts Down presses from the ubu2604 default,
+# so an entry added above that range moves neither.
+:toggle_con
+iseq ${conview} video && set conview sol || set conview video
+set convset 1
+goto os_pick
+
 # ---- Ubuntu 22.04 and up (casper/subiquity): install ISO streams into RAM ----
+# The ISO is downloaded into a tmpfs and loop-mounted there, so the box needs
+# RAM for the whole image plus the squashfs and overlay on top: 4.1 GB for the
+# 24.04 alias today, so plan on 8 GB+ (see the guest-MB note in
+# src/install-matrix.sh).
 # Canonical names the netboot kernel "linux"; the netbootxyz build 22.04.5
 # still rides on calls it "vmlinuz". The initrd is "initrd" in both, so only
 # the kernel needs a per-release name.
@@ -520,7 +587,13 @@ clear casper_retry
 set kbase ${boot${rtag}}
 set kurl ${img${rtag}}
 :casper_try
-kernel --name kboot ${kbase}/${kname} initrd=initrd.magic ${net_kargs} url=${kurl} ${ubu_auto} ${vga_kargs} ${con_kargs} || goto casper_fallback
+# ignore_uuid is belt and braces on top of the codename pairing above:
+# upstream publishes the netboot tree and the ISO hours apart (06:47 and 09:12
+# on 2026-09-09), and a boot inside that window would otherwise hit the
+# unmount-and-panic path. With url= naming the exact medium there is nothing
+# for the UUID test to protect - it exists to stop a LOCAL device scan
+# adopting a stranger's live filesystem.
+kernel --name kboot ${kbase}/${kname} initrd=initrd.magic ${net_kargs} url=${kurl} ignore_uuid ${ubu_auto} ${vga_kargs} ${con_kargs} || goto casper_fallback
 set iurl ${kbase}/initrd
 goto launch
 

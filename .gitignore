@@ -25,6 +25,9 @@ __pycache__/
 src/qemu-test.sh
 src/e2e-test.sh
 src/fallback-test.sh
+# Needs docker plus a busybox lifted out of a casper initrd, so it is part of
+# the harness rather than something a clone can run.
+src/parallel-fetch-test.sh
 src/install-matrix.sh
 .github/workflows/build-test.yml
 .github/workflows/install-matrix.yml

@@ -63,6 +63,26 @@ jobs:
           cat sync.txt
           echo "fail=$fail" >> "$GITHUB_OUTPUT"
 
+      - name: Check every entry's images still belong to its payload
+        id: casper
+        # Every entry, not just Ubuntu: images and payload must come from one
+        # upstream compose. Canonical rebuilds <codename>/netboot/ and the
+        # -latest- ISO together, openSUSE republishes the Agama ISO beside the
+        # loader kernel, Proxmox versions its ISO - each can move on its own
+        # schedule, and this is the weekly look at whether any of them has.
+        # --deep also pulls each casper initrd (~100 MB) to compare the casper
+        # UUID, the value whose mismatch panics the installer onto a console
+        # nobody is watching.
+        run: |
+          set -uo pipefail
+          if ./src/boot-pairing-check.sh --deep > casper.txt 2>&1; then
+            fail=0; : > casper.md
+          else
+            fail=1; sed 's/^/- /' casper.txt > casper.md
+          fi
+          cat casper.txt
+          echo "fail=$fail" >> "$GITHUB_OUTPUT"
+
       - name: Probe iPXE-fetched URLs the way iPXE fetches them
         id: ipxe
         run: |
@@ -187,7 +207,7 @@ jobs:
         # exit non-zero (an unparseable menu is a hard failure), and a skipped
         # step's outputs are empty strings - so without it the watchdog's own
         # breakage would file nothing and look like a clean week.
-        if: always() && (failure() || steps.sync.outputs.fail == '1' || steps.ipxe.outputs.fail == '1' || steps.ipxe.outputs.warn == '1' || steps.bulk.outputs.fail == '1' || steps.boot.outputs.fail == '1' || steps.boot.outputs.drift == '1')
+        if: always() && (failure() || steps.sync.outputs.fail == '1' || steps.casper.outputs.fail == '1' || steps.ipxe.outputs.fail == '1' || steps.ipxe.outputs.warn == '1' || steps.bulk.outputs.fail == '1' || steps.boot.outputs.fail == '1' || steps.boot.outputs.drift == '1')
         run: |
           set -uo pipefail
           {
@@ -205,6 +225,18 @@ jobs:
             if [ -s sync.md ]; then
               echo "### Menu and signing manifest out of sync"
               cat sync.md
+              echo
+            fi
+            if [ -s casper.md ]; then
+              echo "### An entry's boot images no longer match its payload"
+              echo "The images iPXE boots and the payload the installer then"
+              echo "downloads have drifted apart upstream. A kernel-ABI"
+              echo "mismatch strands every module that is not already in the"
+              echo "initrd; a casper UUID mismatch made the installer unmount"
+              echo "the ISO and panic onto /dev/console (2026-09-15)."
+              echo "Re-pin that entry so both halves come from one compose,"
+              echo "then re-run \`./src/boot-pairing-check.sh\`."
+              cat casper.md
               echo
             fi
             if [ -s ipxe.md ]; then
@@ -304,7 +336,8 @@ jobs:
           # Derived from the menu, not hardcoded: a release added to
           # fluxbilling.ipxe must not silently go untracked here.
           #   22.04 - netbootxyz kernel pin; bumping rel2204 would move the
-          #           ISO while boot2204 keeps serving the old kernel.
+          #           ISO while boot2204 keeps serving the old kernel, which
+          #           is exactly the skew src/boot-pairing-check.sh rejects.
           #   interim releases (a bare X.10 / non-LTS) never get point releases.
           skip_series='22.04 25.10'
           series_list=$(sed -n 's/^set rel\([0-9]\{4\}\) .*/\1/p' fluxbilling.ipxe \
@@ -331,10 +364,12 @@ jobs:
               echo "::warning::$series: parsed $latest is older than the pinned $have - ignoring"
               continue
             fi
-            # The menu derives boot$var from rel$var, so a pin whose netboot
-            # tree is missing would ship a kernel URL nobody checked. That
-            # tree is published a little after the ISO, so this is a real
-            # window, not a hypothetical one.
+            # rel$var no longer drives what the entry BOOTS - img*/boot* ride
+            # the codename alias so both halves stay one compose - but it does
+            # drive :casper_fallback's old-releases URL, and that tree is
+            # published a little after the ISO. Keep asserting it exists before
+            # proposing the bump, so the recovery leg is never pinned at a
+            # release whose netboot tree has not landed yet.
             skip=0
             for f in linux initrd; do
               # Assert the FINAL status. `-f` only fails on >=400, so without
