@@ -20,7 +20,7 @@ log_begin_msg() { :; }
 log_end_msg() { :; }
 F
 
-CMD="BOOT_IMAGE=/casper/vmlinuz initrd=initrd.magic ip=203.0.113.10::203.0.113.1:255.255.255.224:web12::none:9.9.9.9:149.112.112.112 BOOTIF=01-7c-d3-0a-d7-a9-f0 hostname=web12 autoinstall ds=nocloud fluxhost=web12 fluxpass=Sup3rSecret! fluxcidr=27 console=tty0"
+CMD="BOOT_IMAGE=/casper/vmlinuz initrd=initrd.magic ip=203.0.113.10::203.0.113.1:255.255.255.224:web12::none:9.9.9.9:149.112.112.112 BOOTIF=01-00-00-5e-00-53-01 hostname=web12 autoinstall ds=nocloud fluxhost=web12 fluxpass=Sup3rSecret! fluxcidr=27 console=tty0"
 run_seed() { # <cmdline>
 	rm -rf "$WORK/root"; mkdir -p "$WORK/root"
 	printf '%s\n' "$1" > "$WORK/cmdline"
@@ -49,7 +49,7 @@ grep -q "via: 203.0.113.1" "$SEED/network-config" 2>/dev/null \
 grep -q "dhcp4: false" "$SEED/network-config" 2>/dev/null \
 	&& ok "DHCP explicitly disabled in the live environment" \
 	|| bad "DHCP not disabled - the hang can come back"
-grep -q "7c:d3:0a:d7:a9:f0" "$SEED/network-config" 2>/dev/null \
+grep -q "00:00:5e:00:53:01" "$SEED/network-config" 2>/dev/null \
 	&& ok "live network is matched to the boot NIC by MAC" \
 	|| bad "live network does not match the boot NIC"
 # Nameservers come from the ip= argument, not from a hardcoded pair.
