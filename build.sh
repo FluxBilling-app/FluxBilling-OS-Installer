@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build FluxBilling-OS-Installer_v1.1.iso — tiny iPXE provisioning image (~2.4 MB).
+# Build FluxBilling-OS-Installer_v1.5.iso — tiny iPXE provisioning image (~2.4 MB).
 #
 # The ISO carries ONLY iPXE + menu + config seeds. Kernels, initrds and
 # install ISOs are fetched at boot time over the data NIC the operator
@@ -22,10 +22,11 @@ docker info >/dev/null 2>&1 || die "docker daemon is not running (start Docker D
 # into the container reads as empty and ships a silently-broken image. The
 # 1-byte read forces iCloud to materialise the file (or fail loudly here).
 PAYLOAD=(fluxbilling.ipxe assets/FluxBilling.png assets/agama-leap16.json
-         src/preseed.cfg src/99fluxseed src/param.conf src/ks.cfg
-         src/autoinst.xml src/50-flux-agama.sh src/flux-scrub
+         src/preseed.cfg src/99fluxseed src/param.conf src/flux-mirror-pick src/ks.cfg
+         src/autoinst.xml src/50-flux-agama.sh src/50-flux-fail.sh src/flux-scrub
          src/flux-scrub.service src/pve-bashrc
-         src/logo-compose.py src/builder.Dockerfile src/fluxcidr_cmd.c)
+         src/logo-compose.py src/builder.Dockerfile src/fluxcidr_cmd.c
+         src/efi-console-ilo4.patch)
 for f in "${PAYLOAD[@]}"; do
   [ -s "$f" ] || die "payload file missing or empty (iCloud eviction?): $f"
   head -c1 "$f" >/dev/null || die "payload file unreadable (iCloud eviction?): $f"
@@ -33,14 +34,16 @@ done
 
 BUILDER=fluxbilling-builder
 
-# Rebuild the builder when it is missing OR when builder.Dockerfile has moved
-# on since the image was baked. The Dockerfile carries real product state - the
-# iPXE config patches, the brand colour palette - so a "does the image exist"
-# check alone silently ships the previous palette for as long as the stale
-# image sits in the local cache. The digest is stamped on as a label and
-# compared here; changing the Dockerfile is the only thing that triggers the
-# ~10 min rebuild.
-WANT=$(shasum -a 256 src/builder.Dockerfile | cut -c1-16)
+# Rebuild the builder when it is missing OR when anything baked into it has
+# moved on since the image was baked (builder.Dockerfile and the sources it
+# COPYs in: the fluxcidr command, the iLO4 EFI-keyboard patch). Those files
+# carry real product state - the iPXE config patches, the brand colour palette
+# - so a "does the image exist" check alone silently ships the previous palette
+# for as long as the stale image sits in the local cache. The digest is stamped
+# on as a label and compared here; changing one of those files is the only
+# thing that triggers the ~10 min rebuild.
+WANT=$(cat src/builder.Dockerfile src/fluxcidr_cmd.c src/efi-console-ilo4.patch |
+         shasum -a 256 | cut -c1-16)
 HAVE=$(docker image inspect -f '{{ index .Config.Labels "flux.builder.hash" }}' \
          "$BUILDER" 2>/dev/null || true)
 
@@ -63,10 +66,18 @@ docker run --rm --platform linux/amd64 -v "$PWD":/w "$BUILDER" bash -exc '
   # Overwrite the dummy files warmed into /work by the builder image; the
   # EMBEDLIST must match the image exactly so make stays incremental.
   cp /w/fluxbilling.ipxe /w/src/preseed.cfg /w/src/99fluxseed \
-     /w/src/param.conf /w/src/ks.cfg /w/src/autoinst.xml \
-     /w/src/50-flux-agama.sh /w/assets/agama-leap16.json \
+     /w/src/param.conf /w/src/flux-mirror-pick /w/src/ks.cfg /w/src/autoinst.xml \
+     /w/src/50-flux-agama.sh /w/src/50-flux-fail.sh /w/assets/agama-leap16.json \
      /w/src/flux-scrub /w/src/flux-scrub.service /w/src/pve-bashrc /work/
-  EMBEDLIST=/work/fluxbilling.ipxe,/work/logo.png,/work/preseed.cfg,/work/99fluxseed,/work/param.conf,/work/ks.cfg,/work/autoinst.xml,/work/agama-leap16.json,/work/50-flux-agama.sh,/work/flux-scrub,/work/flux-scrub.service,/work/pve-bashrc
+  EMBEDLIST=/work/fluxbilling.ipxe,/work/logo.png,/work/preseed.cfg,/work/99fluxseed,/work/param.conf,/work/flux-mirror-pick,/work/ks.cfg,/work/autoinst.xml,/work/agama-leap16.json,/work/50-flux-agama.sh,/work/50-flux-fail.sh,/work/flux-scrub,/work/flux-scrub.service,/work/pve-bashrc
+  # Every name in EMBEDLIST must actually be staged in /work. Adding a payload
+  # file means touching the cp above AND the list below, and forgetting the cp
+  # half fails deep inside the iPXE make with a path nobody recognises - the
+  # builder pre-warms dummies under those names, so a stale dummy can even get
+  # embedded silently. Check it here, where the message can name the file.
+  for f in $(echo $EMBEDLIST | tr , " "); do
+    [ -s "$f" ] || { echo "FATAL: EMBEDLIST names $f but nothing staged it in /work" >&2; exit 1; }
+  done
 
   # Trusted TLS roots. This is what lets the https fetches iPXE makes (the
   # 22.04.5 GitHub release, and any mirror that 301s http->https) validate
@@ -133,15 +144,15 @@ docker run --rm --platform linux/amd64 -v "$PWD":/w "$BUILDER" bash -exc '
   make -j"$(nproc)" bin-x86_64-pcbios/ipxe.lkrn EMBED="$EMBEDLIST" CERT="$TRUSTLIST" TRUST="$TRUSTLIST"
   make -j"$(nproc)" bin-x86_64-efi/ipxe.efi EMBED="$EMBEDLIST" CERT="$TRUSTLIST" TRUST="$TRUSTLIST"
 
-  ./util/genfsimg -o /w/FluxBilling-OS-Installer_v1.1.iso bin-x86_64-pcbios/ipxe.lkrn bin-x86_64-efi/ipxe.efi
+  ./util/genfsimg -o /w/FluxBilling-OS-Installer_v1.5.iso bin-x86_64-pcbios/ipxe.lkrn bin-x86_64-efi/ipxe.efi
 
   # genfsimg only gets a hybrid MBR from an isohybrid post-pass that is
   # guarded by "isohybrid --version" and SKIPPED SILENTLY when syslinux-utils
   # is missing (see builder.Dockerfile) - the ISO then boots over virtual
   # media but is dead when dd-ed to a USB stick. Fail the build instead.
-  sig=$(tail -c +511 /w/FluxBilling-OS-Installer_v1.1.iso | head -c2 | od -An -tx1 | tr -d " ")
+  sig=$(tail -c +511 /w/FluxBilling-OS-Installer_v1.5.iso | head -c2 | od -An -tx1 | tr -d " ")
   [ "$sig" = "55aa" ] || { echo "FATAL: ISO lacks the hybrid-MBR boot signature (got: $sig)" >&2; exit 1; }
 
-  ls -la /w/FluxBilling-OS-Installer_v1.1.iso
+  ls -la /w/FluxBilling-OS-Installer_v1.5.iso
 '
-echo "Done: FluxBilling-OS-Installer_v1.1.iso"
+echo "Done: FluxBilling-OS-Installer_v1.5.iso"

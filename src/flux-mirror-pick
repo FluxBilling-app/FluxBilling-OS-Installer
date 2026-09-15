@@ -1,0 +1,304 @@
+# FluxBilling: fetch the install ISO from whichever source is actually fast.
+#
+# Sourced by /conf/param.conf inside mountroot, after casper's parse_cmdline
+# has set ${URL} (casper: parse_cmdline at 909, run_scripts casper-premount at
+# 926, do_urlmount later) - so re-pointing ${URL} here is seen by the fetch.
+#
+# Why: the menu points casper at releases.ubuntu.com, which is one origin in
+# one place. Measured on a customer box with a genuinely unmetered 10 Gbps
+# port: 0.8 MB/s from that origin, 41 minutes remaining on a 2.9 GB image,
+# while the same file pulled at 37 MB/s from elsewhere. The port was never the
+# limit - the path to Canonical was. Ubuntu mirrors carry a byte-identical
+# copy, usually far closer.
+#
+# What makes this safe rather than a new way to install the wrong thing:
+#
+#   - the mirror is chosen by MEASURED throughput, not by a guess about
+#     geography: each candidate gets a two-second pull and the winner has to
+#     beat the origin by a clear margin;
+#   - a mirror copy is mounted with casper's OWN compose check restored
+#     (matches_uuid against the initrd's /conf/uuid.conf). The menu passes
+#     ignore_uuid for the origin, because origin and netboot tree are verified
+#     to be one compose by src/boot-pairing-check.sh and can only disagree
+#     inside a publish window; a mirror has no such guarantee, so it must
+#     prove itself;
+#   - anything that fails - no index, no candidate, a stale mirror, a mount
+#     that does not look like casper media - falls straight back to the origin
+#     URL the menu shipped. The worst case is the behaviour we had before.
+#
+# Add or remove mirrors by editing the list below; they must serve the
+# ubuntu-releases tree (that is, <base>/<series>/ubuntu-<series>.N-live-server-
+# amd64.iso). Everything here runs under busybox ash with the initrd's own
+# wget, so: no arrays, no sort -V, no timeout(1).
+
+# Public Ubuntu release mirrors, all verified to serve the same byte count as
+# the origin. Add one close to your own fleet at the top of this list - an
+# on-net mirror is usually an order of magnitude faster than any of these, and
+# the race below will pick it automatically when it wins.
+FLUX_MIRRORS="https://ftp.halifax.rwth-aachen.de/ubuntu-releases
+https://mirror.init7.net/ubuntu-releases
+https://ubuntu.mirrors.ovh.net/ubuntu-releases
+https://ftp.lysator.liu.se/pub/ubuntu-releases"
+
+# Below this, the origin is fast enough that racing mirrors would cost more
+# wall clock than it saves. 25 MB/s fills a 3 GB image in two minutes.
+FLUX_FAST_ENOUGH=26214400
+# A mirror has to be this much faster than the origin before we move to it.
+FLUX_MARGIN_NUM=13
+FLUX_MARGIN_DEN=10
+
+flux_say() { # to every console, like the rest of param.conf
+	for c in $(flux_consoles 2>/dev/null); do
+		printf 'FluxBilling: %s\n' "$*" > "$c" 2>/dev/null
+	done
+}
+
+# Bytes pulled in two seconds. Counted from /proc/<pid>/io so nothing is
+# written to RAM - a 2 s probe at 37 MB/s would otherwise cost 74 MB of tmpfs
+# per candidate.
+#
+# The ORIGIN is probed with flux_probe_into instead: it writes into the file
+# the fetch would use anyway, so the sample is simply the first two seconds of
+# the real download and `wget -c` picks up from there. Nothing is downloaded
+# twice on the path that matters - only the mirrors, which are alternatives
+# that cannot be resumed into the same file, pay for their two seconds.
+flux_probe_into() { # <url> <out> -> bytes
+	local p b
+	wget -q -c -O "$2" "$1" 2>/dev/null &
+	p=$!
+	sleep 2
+	b=$(awk '/^rchar:/{print $2}' "${flux_procdir:-/proc}/$p/io" 2>/dev/null)
+	kill "$p" 2>/dev/null
+	wait "$p" 2>/dev/null
+	printf '%s' "${b:-0}"
+}
+
+flux_probe() { # <url> -> bytes
+	local p b
+	wget -q -O /dev/null "$1" 2>/dev/null &
+	p=$!
+	sleep 2
+	b=$(awk '/^rchar:/{print $2}' "${flux_procdir:-/proc}/$p/io" 2>/dev/null)
+	kill "$p" 2>/dev/null
+	wait "$p" 2>/dev/null
+	printf '%s' "${b:-0}"
+}
+
+# The newest live-server ISO a mirror actually has for this series. Plain sort:
+# point releases are single digits in practice, and a mirror that is one point
+# release behind is rejected later anyway, by the uuid check.
+flux_mirror_iso() { # <base> <series> -> url or nothing
+	local idx name
+	idx=$(wget -q -O - "$1/$2/" 2>/dev/null) || return 0
+	name=$(printf '%s' "$idx" | tr '"<>' '\n\n\n' \
+		| grep -o "ubuntu-$2\(\.[0-9]\)\?-live-server-amd64\.iso" \
+		| sort | tail -n1)
+	[ -n "$name" ] && printf '%s/%s/%s' "$1" "$2" "$name"
+}
+
+flux_mirror_pick() {
+	[ -z "${flux_mirror_done:-}" ] || return 0
+	[ -n "${URL:-}" ] || return 0
+	# Only our casper entries, which is where the menu uses the -latest- alias.
+	case "$URL" in
+		*-latest-live-server-amd64.iso) ;;
+		*) return 0 ;;
+	esac
+	flux_mirror_done=1
+	flux_origin_url="$URL"
+
+	local series base cand speed best best_url origin
+	series=${URL##*/ubuntu-}
+	series=${series%%-latest-*}
+	case "$series" in ''|*[!0-9.]*) return 0 ;; esac
+
+	flux_origin_partial=$(basename "$URL")
+	origin=$(flux_probe_into "$URL" "$flux_origin_partial")
+	flux_last_speed=$origin
+	if [ "${origin:-0}" -ge "$FLUX_FAST_ENOUGH" ]; then
+		flux_say "origin is $((origin / 2097152)) MB/s - fetching from releases.ubuntu.com"
+		return 0
+	fi
+	flux_say "origin is only $((origin / 2097152)) MB/s - looking for a faster mirror"
+
+	best=$origin
+	best_url=""
+	for base in $FLUX_MIRRORS; do
+		cand=$(flux_mirror_iso "$base" "$series")
+		[ -n "$cand" ] || continue
+		speed=$(flux_probe "$cand")
+		[ "${speed:-0}" -gt "$((best * FLUX_MARGIN_NUM / FLUX_MARGIN_DEN))" ] || continue
+		best=$speed
+		best_url=$cand
+	done
+
+	flux_last_speed=$best
+	if [ -n "$best_url" ]; then
+		flux_mirror_url="$best_url"
+		# Those first seconds of the origin are dead weight now - a mirror
+		# writes to its own filename, and tmpfs is the installer's RAM.
+		rm -f "$flux_origin_partial" 2>/dev/null
+		flux_say "using ${best_url%/*}/ at $((best / 2097152)) MB/s"
+	else
+		flux_say "no mirror beat the origin - staying on releases.ubuntu.com"
+	fi
+}
+
+# --- Parallel fetch ---------------------------------------------------------
+# A flat, unvarying 6 Mbit/s on an unmetered 10 Gbps port is the signature of a
+# PER-CONNECTION limit, not a slow link - and busybox wget can beat that
+# without any extra tooling: -c resumes, which means it sends a Range header,
+# and -S prints the response so we can read Content-Length and confirm the
+# server answered 206. Seed a part file to the offset we want, let wget fill
+# from there, kill it at the boundary, then dd the pieces together.
+#
+# This only ever runs when a measurement says it will help: one stream is timed
+# against three parallel ones on the SAME url, and unless the parallel set is
+# clearly faster the plain single-stream fetch is used. On a box whose limit is
+# global (a policer, a slow uplink) nothing changes but four wasted seconds.
+FLUX_PARALLEL_MIN=10485760
+FLUX_PARALLEL_WAYS=4
+
+# Content-Length of a url, by reading the headers and killing the transfer as
+# soon as they land.
+flux_size_of() { # <url> -> bytes or nothing
+	local log p n i=0
+	log=$(mktemp 2>/dev/null) || log=/flux-size.$$
+	wget -S -O /dev/null "$1" > "$log" 2>&1 &
+	p=$!
+	while [ "$i" -lt 10 ]; do
+		n=$(grep -i "^ *Content-Length:" "$log" 2>/dev/null | tail -n1 | tr -dc 0-9)
+		[ -n "$n" ] && break
+		i=$((i + 1))
+		sleep 1
+	done
+	kill "$p" 2>/dev/null; wait "$p" 2>/dev/null
+	rm -f "$log"
+	printf '%s' "$n"
+}
+
+# Aggregate bytes of N simultaneous two-second probes.
+flux_probe_parallel() { # <url> <ways> -> bytes
+	local i=0 total=0 pids="" p b
+	while [ "$i" -lt "$2" ]; do
+		wget -q -O /dev/null "$1" 2>/dev/null &
+		pids="$pids $!"
+		i=$((i + 1))
+	done
+	sleep 2
+	for p in $pids; do
+		b=$(awk '/^rchar:/{print $2}' "${flux_procdir:-/proc}/$p/io" 2>/dev/null)
+		total=$((total + ${b:-0}))
+		kill "$p" 2>/dev/null
+		wait "$p" 2>/dev/null
+	done
+	printf '%s' "$total"
+}
+
+# Fetch <url> into <out> using <ways> ranged streams. Returns 1 on anything
+# unexpected, having cleaned up - the caller then does a plain fetch.
+flux_fetch_parallel() { # <url> <out> <total> <ways>
+	local url=$1 out=$2 total=$3 ways=$4
+	local chunk_mb i start_mb want p pids="" ok=1 sz
+	# Whole MiB per chunk so the reassembly can use bs=1M.
+	chunk_mb=$(( (total / 1048576 + ways) / ways ))
+	[ "$chunk_mb" -gt 0 ] || return 1
+	rm -f "$out" "$out".part* 2>/dev/null
+	i=0
+	while [ "$i" -lt "$ways" ]; do
+		start_mb=$((i * chunk_mb))
+		# Sparse: the offset costs no memory, only the bytes wget writes do.
+		dd if=/dev/zero of="$out.part$i" bs=1M seek="$start_mb" count=0 2>/dev/null
+		wget -q -c -O "$out.part$i" "$url" 2>/dev/null &
+		pids="$pids $!"
+		i=$((i + 1))
+	done
+	# Stop each stream once it has covered its chunk; the last one runs to EOF.
+	i=0
+	for p in $pids; do
+		want=$(( (i + 1) * chunk_mb * 1048576 ))
+		[ "$i" = "$((ways - 1))" ] && want=$total
+		while kill -0 "$p" 2>/dev/null; do
+			sz=$(ls -l "$out.part$i" 2>/dev/null | awk '{print $5}')
+			[ "${sz:-0}" -ge "$want" ] && break
+			sleep 2
+		done
+		kill "$p" 2>/dev/null
+		wait "$p" 2>/dev/null
+		i=$((i + 1))
+	done
+	# Reassemble, dropping each part as it lands so peak memory stays at one
+	# copy of the image plus one chunk.
+	i=0
+	: > "$out"
+	while [ "$i" -lt "$ways" ]; do
+		if [ "$i" = "$((ways - 1))" ]; then
+			dd if="$out.part$i" bs=1M skip="$((i * chunk_mb))" >> "$out" 2>/dev/null
+		else
+			dd if="$out.part$i" bs=1M skip="$((i * chunk_mb))" count="$chunk_mb" >> "$out" 2>/dev/null
+		fi
+		rm -f "$out.part$i"
+		i=$((i + 1))
+	done
+	sz=$(ls -l "$out" 2>/dev/null | awk '{print $5}')
+	[ "${sz:-0}" = "$total" ] && ok=0
+	[ "$ok" = 0 ] || rm -f "$out"
+	return $ok
+}
+
+# One stream, or several - decided by measurement, not by hope.
+flux_fetch() { # <url> <out>
+	local single par total
+	single=${flux_last_speed:-0}
+	if [ "$single" -gt 0 ] && [ "$single" -lt "$FLUX_PARALLEL_MIN" ]; then
+		total=$(flux_size_of "$1")
+		case "$total" in ''|*[!0-9]*) total="" ;; esac
+		if [ -n "$total" ]; then
+			par=$(flux_probe_parallel "$1" "$FLUX_PARALLEL_WAYS")
+			if [ "${par:-0}" -gt "$((single * 15 / 10))" ]; then
+				flux_say "one stream is $((single / 2097152)) MB/s, $FLUX_PARALLEL_WAYS are $((par / 2097152)) MB/s - splitting the fetch"
+				flux_fetch_parallel "$1" "$2" "$total" "$FLUX_PARALLEL_WAYS" && return 0
+				flux_say "split fetch did not come back whole - falling back to one stream"
+			fi
+		fi
+	fi
+	# -c: continue the bytes the origin probe already banked.
+	wget -c "$1" -O "$2"
+}
+
+# casper's do_urlmount, with the mirror tried first and the origin kept as the
+# fallback. The body is the stock one (mount, is_casper_path, matches_uuid,
+# umount on failure); only the source selection and the fetch are ours.
+flux_urlmount_once() {
+	local rc=1 target
+	modprobe "${MP_QUIET}" isofs
+	target=$(basename "${URL}")
+	if flux_fetch "${URL}" "${target}"; then
+		if mount -o ro "${target}" "${mountpoint}"; then
+			if is_casper_path "$mountpoint" && matches_uuid "$mountpoint"; then
+				rc=0
+			else
+				umount "$mountpoint"
+				rm -f "$target"
+			fi
+		fi
+	fi
+	return $rc
+}
+
+do_urlmount() {
+	flux_mirror_pick
+	if [ -n "${flux_mirror_url:-}" ]; then
+		URL="$flux_mirror_url"
+		# The mirror has to prove it is the same compose as this initrd -
+		# ignore_uuid on the cmdline only ever covered the origin.
+		UUID=$(cat "${flux_confdir:-/conf}/uuid.conf" 2>/dev/null)
+		if flux_urlmount_once; then
+			return 0
+		fi
+		flux_say "mirror copy did not match this installer - falling back to releases.ubuntu.com"
+	fi
+	URL="${flux_origin_url:-$URL}"
+	UUID=""
+	flux_urlmount_once
+}

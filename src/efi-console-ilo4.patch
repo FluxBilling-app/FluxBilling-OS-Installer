@@ -1,0 +1,125 @@
+--- a/src/interface/efi/efi_console.c
++++ b/src/interface/efi/efi_console.c
+@@ -290,6 +290,40 @@
+ 		return ansi_sequences[scancode];
+ 	}
+ 	return NULL;
++}
++
++/* FluxBilling: buffered key fetched by efi_iskey(), if any */
++static EFI_KEY_DATA efi_last_key;
++static int efi_have_key;
++
++/**
++ * Read a key from the EFI console input protocols
++ *
++ * FluxBilling: HP iLO4 (Gen8/Gen9) UEFI firmware exposes SimpleTextInputEx
++ * but keeps its keystroke queue and WaitForKeyEx event separate from the
++ * plain SimpleTextInput protocol - and stock iPXE reads through the Ex
++ * protocol while testing readiness on the PLAIN protocol's WaitForKey event
++ * (which the firmware then never signals), so every keystroke from the iLO
++ * virtual keyboard is dropped and the menu is undrivable except over SOL.
++ * Read through the Ex protocol when present and FALL BACK to the plain one,
++ * which also covers firmware whose ReadKeyStrokeEx is simply broken.
++ */
++static int efi_read_key ( EFI_KEY_DATA *key ) {
++	EFI_SIMPLE_TEXT_INPUT_PROTOCOL *conin = efi_systab->ConIn;
++	EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOL *conin_ex = efi_conin_ex;
++	EFI_STATUS efirc;
++
++	if ( conin_ex ) {
++		memset ( key, 0, sizeof ( *key ) );
++		if ( ( efirc = conin_ex->ReadKeyStrokeEx ( conin_ex,
++							   key ) ) == 0 )
++			return 1;
++	}
++	memset ( key, 0, sizeof ( *key ) );
++	if ( ( efirc = conin->ReadKeyStroke ( conin, &key->Key ) ) == 0 )
++		return 1;
++
++	return 0;
+ }
+ 
+ /**
+@@ -298,38 +332,24 @@
+  * @ret character	Character read from console
+  */
+ static int efi_getchar ( void ) {
+-	EFI_SIMPLE_TEXT_INPUT_PROTOCOL *conin = efi_systab->ConIn;
+-	EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOL *conin_ex = efi_conin_ex;
+ 	const char *ansi_seq;
+ 	unsigned int character;
+ 	unsigned int shift;
+ 	unsigned int toggle;
+ 	EFI_KEY_DATA key;
+-	EFI_STATUS efirc;
+-	int rc;
+ 
+ 	/* If we are mid-sequence, pass out the next byte */
+ 	if ( *ansi_input )
+ 		return *(ansi_input++);
+ 
+-	/* Read key from real EFI console */
+-	memset ( &key, 0, sizeof ( key ) );
+-	if ( conin_ex ) {
+-		if ( ( efirc = conin_ex->ReadKeyStrokeEx ( conin_ex,
+-							   &key ) ) != 0 ) {
+-			rc = -EEFI ( efirc );
+-			DBG ( "EFI could not read extended keystroke: %s\n",
+-			      strerror ( rc ) );
+-			return 0;
+-		}
+-	} else {
+-		if ( ( efirc = conin->ReadKeyStroke ( conin,
+-						      &key.Key ) ) != 0 ) {
+-			rc = -EEFI ( efirc );
+-			DBG ( "EFI could not read keystroke: %s\n",
+-			      strerror ( rc ) );
+-			return 0;
+-		}
++	/* Use the key efi_iskey() already pulled out of the firmware, if
++	 * any, otherwise read one now.
++	 */
++	if ( efi_have_key ) {
++		memcpy ( &key, &efi_last_key, sizeof ( key ) );
++		efi_have_key = 0;
++	} else if ( ! efi_read_key ( &key ) ) {
++		return 0;
+ 	}
+ 	DBG2 ( "EFI read key stroke shift %08x toggle %02x unicode %04x "
+ 	       "scancode %04x\n", key.KeyState.KeyShiftState,
+@@ -383,20 +403,29 @@
+  *
+  * @ret True		Character available to read
+  * @ret False		No character available to read
++ *
++ * FluxBilling: poll the input protocols directly instead of waiting on
++ * conin->WaitForKey. See efi_read_key() - on iLO4 that event belongs to a
++ * protocol iPXE never reads from, so it stays unsignalled forever while keys
++ * sit in the Ex queue. A ReadKeyStroke[Ex] with an empty queue just returns
++ * EFI_NOT_READY, so polling costs nothing on sane firmware.
+  */
+ static int efi_iskey ( void ) {
+-	EFI_BOOT_SERVICES *bs = efi_systab->BootServices;
+-	EFI_SIMPLE_TEXT_INPUT_PROTOCOL *conin = efi_systab->ConIn;
+-	EFI_STATUS efirc;
+ 
+ 	/* If we are mid-sequence, we are always ready */
+ 	if ( *ansi_input )
+ 		return 1;
+ 
+-	/* Check to see if the WaitForKey event has fired */
+-	if ( ( efirc = bs->CheckEvent ( conin->WaitForKey ) ) == 0 )
++	/* A key pulled out by an earlier poll is still pending */
++	if ( efi_have_key )
+ 		return 1;
+ 
++	/* Poll the firmware, buffering any key for efi_getchar() */
++	if ( efi_read_key ( &efi_last_key ) ) {
++		efi_have_key = 1;
++		return 1;
++	}
++
+ 	return 0;
+ }
+ 

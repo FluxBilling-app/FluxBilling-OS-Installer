@@ -8,7 +8,7 @@
 FROM debian:bookworm@sha256:9344f8b8992482f80cba753f323adeaf17690076c095ccff6cc9536be98185dc
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git make gcc binutils perl liblzma-dev mtools genisoimage syslinux isolinux \
+    git make gcc binutils perl patch liblzma-dev mtools genisoimage syslinux isolinux \
     syslinux-common syslinux-utils xorriso cpio zstd initramfs-tools-core python3-pil \
     fonts-dejavu-core gcc-multilib libc6-dev-i386 xz-utils \
     qemu-system-x86 ovmf ca-certificates curl && rm -rf /var/lib/apt/lists/*
@@ -124,6 +124,28 @@ RUN cd /ipxe/src && \
     perl -pi -e 's{^\t\[COLOR_CYAN\]\t= ANSICOL_DEFAULT \( COLOR_CYAN \),$}{\t[COLOR_CYAN]\t= ANSICOL_DEFINE ( COLOR_CYAN, 0x038bf8 ),}; s{^\t\[COLOR_WHITE\]\t= ANSICOL_DEFAULT \( COLOR_WHITE \),$}{\t[COLOR_WHITE]\t= ANSICOL_DEFINE ( COLOR_WHITE, 0xffffff ),}' core/ansicoldef.c && \
     grep -q "ANSICOL_DEFINE ( COLOR_CYAN, 0x038bf8 )" core/ansicoldef.c && \
     grep -q "ANSICOL_DEFINE ( COLOR_WHITE, 0xffffff )" core/ansicoldef.c
+
+# iLO4 (and any firmware with a split SimpleTextInputEx queue) keyboard fix,
+# UEFI side. Stock efi_console.c READS keys through SimpleTextInputEx when the
+# firmware offers it, but tests readiness on the PLAIN SimpleTextInput
+# protocol's conin->WaitForKey event. HP iLO4 Gen8/Gen9 UEFI keeps the two
+# protocols on separate queues and never signals that plain event once the Ex
+# protocol is open, so efi_iskey() answers "no key" forever: the menu draws over
+# the iLO virtual console (HTML5 and the Java IRC alike) and every keystroke is
+# swallowed - only IPMI SOL can drive it. The patch makes efi_iskey() POLL the
+# input protocols directly (ReadKeyStroke[Ex] on an empty queue just returns
+# EFI_NOT_READY, so it costs nothing elsewhere), buffers the key it pulls for
+# efi_getchar(), and falls back from ReadKeyStrokeEx to plain ReadKeyStroke -
+# which also covers firmware whose Ex read is simply broken. BIOS builds get
+# their own keyboard fix above (USB stack left to the firmware); the two are
+# independent.
+#   --fuzz=0 so the patch fails the build loudly if the pinned iPXE ever drifts
+# from the shape this was cut against.
+COPY efi-console-ilo4.patch /tmp/efi-console-ilo4.patch
+RUN cd /ipxe && patch -p1 --fuzz=0 < /tmp/efi-console-ilo4.patch && \
+    grep -q "buffered key fetched by efi_iskey" src/interface/efi/efi_console.c && \
+    grep -q "efi_read_key ( &efi_last_key )" src/interface/efi/efi_console.c && \
+    ! grep -q "CheckEvent ( conin->WaitForKey )" src/interface/efi/efi_console.c
 
 # Bake the custom fluxcidr command into the always-linked command file so its
 # object is pre-compiled here, not on every build.
