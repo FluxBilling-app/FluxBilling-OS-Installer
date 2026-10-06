@@ -73,19 +73,19 @@ answers (password as a SHA-512 hash, never plaintext at rest).
 
 ## Quick start
 
-1. Grab `FluxBilling-OS-Installer_v1.5.iso` from
+1. Grab `FluxBilling-OS-Installer_v1.6.iso` from
    [Releases](../../releases) — or [build it](#building).
 2. Attach via virtual media — or flash a USB stick:
 
    ```sh
    # macOS - replace diskN with the USB stick
    diskutil unmountDisk /dev/diskN
-   sudo dd if=FluxBilling-OS-Installer_v1.5.iso of=/dev/rdiskN bs=1m
+   sudo dd if=FluxBilling-OS-Installer_v1.6.iso of=/dev/rdiskN bs=1m
    ```
 
    ```sh
    # Linux - replace sdX with the USB stick
-   sudo dd if=FluxBilling-OS-Installer_v1.5.iso of=/dev/sdX bs=1M status=progress conv=fsync
+   sudo dd if=FluxBilling-OS-Installer_v1.6.iso of=/dev/sdX bs=1M status=progress conv=fsync
    ```
 
    **Windows** — Windows has no `dd`. Use
@@ -355,7 +355,7 @@ plain HTTP, with no dependency on anyone else's PKI.
 Needs Docker. Everything is pinned:
 
 ```sh
-./build.sh        # outputs FluxBilling-OS-Installer_v1.5.iso
+./build.sh        # outputs FluxBilling-OS-Installer_v1.6.iso
 ```
 
 First run bakes the builder image (~10 min); every rebuild after that is ~15
@@ -429,5 +429,5 @@ any of them, nor by the iPXE project or netboot.xyz.
 ---
 
 <p align="center">
-  <i>FluxBilling OS Installer v1.5 — powered by <a href="https://ipxe.org">iPXE</a>.</i>
+  <i>FluxBilling OS Installer v1.6 — powered by <a href="https://ipxe.org">iPXE</a>.</i>
 </p>

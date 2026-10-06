@@ -31,7 +31,7 @@ set acc ${cl_blu}
 set err ${b_on}${cl_wht}
 
 set app_name Flux Installer
-set app_ver 1.5
+set app_ver 1.6
 set portal FluxBilling.app
 
 # --- distro image + boot endpoints ---
