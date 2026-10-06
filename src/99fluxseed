@@ -70,6 +70,15 @@ FLUXROOT=${flux_root:-/root}
 D=$FLUXROOT/var/lib/cloud/seed/nocloud
 mkdir -p "$D"
 
+# The disk rule every automated entry shares (src/flux-disks), for the
+# early-command in the template below. The menu appends it to the initrd root,
+# which the live system no longer sees once casper switch_roots - so it goes
+# into the live root, like the seed itself. A copy that fails to land makes
+# that early-command fail, and subiquity stops before touching any disk.
+mkdir -p "$FLUXROOT/usr/local/sbin"
+cp "${flux_disks:-/flux-disks}" "$FLUXROOT/usr/local/sbin/flux-disks" 2>/dev/null &&
+	chmod 755 "$FLUXROOT/usr/local/sbin/flux-disks"
+
 cat > "$D/meta-data" <<EOF
 instance-id: fluxbilling-$H
 local-hostname: $H
@@ -109,9 +118,24 @@ autoinstall:
   ssh:
     install-server: true
     allow-pw: true
+  # Choose the install disk by the rule every automated entry shares, and -
+  # when the operator answered Yes on the menu's erase-all-disks screen,
+  # which puts fluxwipe=1 on the command line - wipe every disk first.
+  # Early-commands run before subiquity probes storage, and it re-reads
+  # /autoinstall.yaml once they are done, so writing the chosen disk into
+  # the storage match below is what makes it install there. No eligible disk
+  # leaves a path that matches nothing: the install stops with "no disk
+  # matching" instead of guessing.
+  early-commands:
+    - |
+      t=$(sh /usr/local/sbin/flux-disks) || t=/dev/flux-no-fixed-disk-found; sed -i "s|@ZDISK@|$t|" /autoinstall.yaml
   storage:
     layout:
       name: direct
+      # The FIRST disk, like every other entry. Without a match subiquity
+      # takes the LARGEST disk - a data disk, on most servers that have one.
+      match:
+        path: '@ZDISK@'
     swap:
       size: 0
   packages:

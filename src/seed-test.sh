@@ -25,7 +25,8 @@ run_seed() { # <cmdline>
 	rm -rf "$WORK/root"; mkdir -p "$WORK/root"
 	printf '%s\n' "$1" > "$WORK/cmdline"
 	( export flux_cmdline="$WORK/cmdline" flux_root="$WORK/root" \
-	         flux_casper_functions="$WORK/scripts/casper-functions"
+	         flux_casper_functions="$WORK/scripts/casper-functions" \
+	         flux_disks=./src/flux-disks
 	  sh ./src/99fluxseed >/dev/null 2>&1 )
 }
 SEED="$WORK/root/var/lib/cloud/seed/nocloud"
@@ -86,6 +87,32 @@ grep -q "TimeoutStartSec=300" "$DROPIN" 2>/dev/null \
 	&& ok "cloud-init network stage can no longer hang without limit" \
 	|| bad "no timeout backstop for cloud-init-network.service"
 
+# The install disk: the shared rule (src/flux-disks) picks it in an
+# early-command and writes it into the storage match, because subiquity's own
+# default is the LARGEST disk - on most servers with one, a data disk.
+cmp -s ./src/flux-disks "$WORK/root/usr/local/sbin/flux-disks" \
+	&& [ -x "$WORK/root/usr/local/sbin/flux-disks" ] \
+	&& ok "the disk rule is copied into the live root, executable" \
+	|| bad "the live root has no (or a different) /usr/local/sbin/flux-disks"
+grep -q 'sh /usr/local/sbin/flux-disks' "$SEED/user-data" 2>/dev/null \
+	&& grep -q 'sed -i "s|@ZDISK@|$t|" /autoinstall.yaml' "$SEED/user-data" \
+	&& ok "an early-command writes the chosen disk into /autoinstall.yaml" \
+	|| bad "no early-command hands the chosen disk to subiquity"
+grep -q "path: '@ZDISK@'" "$SEED/user-data" 2>/dev/null \
+	&& ok "storage layout matches on the chosen disk, not the largest" \
+	|| bad "storage layout has no disk match - subiquity takes the largest disk"
+if python3 -c 'import yaml' 2>/dev/null; then
+	python3 - "$SEED/user-data" <<'PY' && ok "user-data is valid YAML with the disk match in place" \
+		|| bad "user-data does not parse, or the disk match is not where subiquity reads it"
+import sys, yaml
+ai = yaml.safe_load(open(sys.argv[1]))["autoinstall"]
+assert ai["storage"]["layout"]["match"] == {"path": "@ZDISK@"}, ai["storage"]
+assert "flux-disks" in ai["early-commands"][0], ai["early-commands"]
+PY
+else
+	echo "SEED SKIP    YAML parse (no python3 yaml module here)"
+fi
+
 # Invariants that existed before this change and must survive it.
 grep -q "Sup3rSecret" "$SEED/user-data" 2>/dev/null \
 	&& bad "the password leaked into user-data" \
@@ -99,6 +126,7 @@ run_seed "${CMD/ autoinstall/}"
 [ -e "$SEED/user-data" ] && bad "manual mode wrote a seed anyway" \
 	|| ok "manual mode writes no seed"
 [ -e "$WORK/root/etc/systemd/system/cloud-init-network.service.d" ] \
+	|| [ -e "$WORK/root/usr/local/sbin/flux-disks" ] \
 	&& bad "manual mode touched the live system" \
 	|| ok "manual mode leaves the live system alone"
 

@@ -9,6 +9,22 @@
     "password": "!",
     "hashedPassword": true
   },
+  "storage": {
+    "drives": [
+      {
+        "search": "@ZDISK@",
+        "partitions": [
+          {
+            "search": "*",
+            "delete": true
+          },
+          {
+            "generate": "default"
+          }
+        ]
+      }
+    ]
+  },
   "scripts": {
     "post": [
       {

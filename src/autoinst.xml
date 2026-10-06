@@ -9,7 +9,7 @@
      AutoYaST then uses instead of this file, and the chroot-script sets the
      credentials. Static network is configured by linuxrc (ifcfg=/hostname=
      boot args) and carried into the installed system by keep_install_network.
-     No <partitioning> section: YaST uses its automatic whole-disk proposal. -->
+     The install disk is chosen at install time too - see <partitioning>. -->
 <profile xmlns="http://www.suse.com/1.0/yast2ns" xmlns:config="http://www.suse.com/1.0/configns">
   <general>
     <mode>
@@ -27,10 +27,18 @@ C=$(cat /proc/cmdline)
 zget() { echo "$C" | tr ' ' '\n' | sed -n "s/^$1=//p" | head -n1; }
 H=$(zget fluxhost); [ -n "$H" ] || H=fluxserver
 HS=$(echo "$H" | sed 's/[\/&]/\\&/g')
+# The install disk, by the rule every automated entry shares - and, with
+# fluxwipe=1 on the command line (the operator answered Yes on the menu's
+# erase-all-disks screen), every disk wiped first. /flux-disks rides in the
+# initrd root, which is YaST's root as well: linuxrc never switch_roots, the
+# same reason file:///flux-autoinst.xml resolves. Pre-scripts run before YaST
+# probes storage, so the proposal is computed on the wiped disks. No eligible
+# disk leaves a device that does not exist, and AutoYaST stops on it.
+Z=$(sh /flux-disks) || Z=/dev/flux-no-fixed-disk-found
 # fluxpass is deliberately not substituted in: AutoYaST caches this profile
 # onto the installed system, so the password is set by the chroot-script.
 cp /tmp/profile/autoinst.xml /tmp/profile/modified.xml
-sed -i "s/@ZH@/$HS/g" /tmp/profile/modified.xml
+sed -i -e "s/@ZH@/$HS/g" -e "s|@ZDISK@|$Z|g" /tmp/profile/modified.xml
 ]]></source>
       </script>
     </pre-scripts>
@@ -170,6 +178,19 @@ chroot /mnt systemctl enable flux-scrub.service
       </script>
     </chroot-scripts>
   </scripts>
+  <!-- One drive, written in by the pre-script for @ZDISK@: the disk the
+       shared rule (src/flux-disks) chose. A drive with no <partitions> gets
+       YaST's own guided proposal, restricted to that drive - the layout the
+       whole-disk proposal used to produce, on the FIRST disk rather than
+       wherever the proposal settled. Disks not listed here are left alone by
+       YaST; after a confirmed wipe that means blank. -->
+  <partitioning config:type="list">
+    <drive>
+      <device>@ZDISK@</device>
+      <initialize config:type="boolean">true</initialize>
+      <use>all</use>
+    </drive>
+  </partitioning>
   <networking>
     <keep_install_network config:type="boolean">true</keep_install_network>
     <dns>

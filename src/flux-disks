@@ -1,0 +1,294 @@
+#!/bin/sh
+# FluxBilling: pick the install disk, and wipe every disk when told to.
+#
+# One rule shared by every automated entry in the menu, so d-i, subiquity,
+# anaconda, AutoYaST, Agama and the Proxmox installer all put the operating
+# system on the same disk of the same server:
+#
+#   TARGET  the first ELIGIBLE disk in kernel-name order - the order
+#           /sys/block/* sorts in, which is also the order d-i's own
+#           list-devices walks: nvme0n1 before sda, sda before sdb.
+#   WIPE    with fluxwipe=1 on the kernel command line, EVERY eligible disk
+#           is wiped before the installer looks at any of them - the target
+#           and all the others. The boot menu adds fluxwipe=1 only after the
+#           operator answers "Yes" on its erase-all-disks screen. Without it
+#           (manual mode, or an older menu booting a newer boot image) this
+#           still picks the target and wipes nothing.
+#
+# Prints the target as /dev/<name> on stdout and exits 0. Exits 1 with nothing
+# on stdout - and nothing wiped - when no disk qualifies; every caller turns
+# that into a stopped install rather than a guess. Messages go to stderr and
+# the kernel log, never stdout, because callers capture stdout.
+#
+# ELIGIBLE is a local, writable whole disk that is not removable media:
+#   - not a virtual or stacked device (loop, ram, zram, dm, md, sr, fd, nbd,
+#     drbd, zvol, rbd, pmem, mtd, ubi, bcache, eMMC boot areas);
+#   - removable=0: USB sticks, card readers and BMC virtual media report 1,
+#     and this image is booted from exactly those;
+#   - not attached over USB at all - some sticks report removable=0, and the
+#     stick this installer booted from must never be chosen or wiped;
+#   - not a Fibre Channel or iSCSI LUN - shared SAN storage belongs to
+#     whoever else is zoned to it;
+#   - writable (ro=0), not empty, and not a hidden NVMe multipath path.
+#
+# The WIPE is quick on purpose - an automated install has to stay one. Per
+# disk: whatever lives on it is stopped first (swap, mounts, md arrays, LVM,
+# dm-crypt); then the first and last 16 MiB of every partition and of the
+# whole disk are zeroed, which takes out the partition tables (MBR and both
+# GPT copies), RAID metadata at either end (md 0.90/1.x, DDF, Intel IMSM),
+# LVM, ZFS labels, LUKS headers and keyslots, and filesystem superblocks;
+# last, the whole device is discarded where it supports it, which on SSD and
+# NVMe drops the data itself. Sectors in the middle of a spinning disk are NOT
+# overwritten: that takes hours per disk and is a job for a dedicated erase,
+# not for an installer.
+#
+# A disk that is still in use after all that - something the installer
+# environment itself depends on - is skipped and named in the log rather than
+# pulled out from under a running system.
+#
+# Plain POSIX sh plus cat/dd/sed/grep/readlink, because it runs under d-i's
+# busybox (no awk there) as well as dash and bash. mdadm, dmsetup, wipefs,
+# blkdiscard, python3, blockdev and udevadm are used when present and skipped
+# when not - anaconda's stage2, for one, has no blkdiscard, so python3 issues
+# the same ioctl there. The flux_* variables exist so src/disks-test.sh can
+# aim all of this at a fake /sys and /dev; in an installer they are unset.
+
+export LC_ALL=C
+S=${flux_sys:-/sys}
+D=${flux_dev:-/dev}
+P=${flux_proc:-/proc}
+# 16 MiB, in the 512-byte sectors /sys/block reports sizes and offsets in.
+EDGE=32768
+
+say() {
+	echo "FluxBilling: $*" >&2
+	echo "<5>FluxBilling: $*" >> "${flux_kmsg:-/dev/kmsg}" 2>/dev/null || :
+}
+
+# /dev node for a /sys/block name - sysfs spells nested nodes with '!'
+# (/sys/block/cciss!c0d0 is /dev/cciss/c0d0).
+node() {
+	echo "$D/$(echo "$1" | sed 's,!,/,g')"
+}
+
+eligible() { # eligible <name>
+	local b=$S/block/$1 n
+	case $1 in
+	loop*|ram*|zram*|dm-*|md*|sr*|fd*|nbd*|drbd*|zd*|rbd*|pmem*|mtd*|ubi*|bcache*)
+		return 1 ;;
+	mmcblk*boot*|mmcblk*rpmb|nvme*c*)
+		return 1 ;;
+	esac
+	[ "$(cat "$b/removable" 2>/dev/null)" = 0 ] || return 1
+	[ "$(cat "$b/ro" 2>/dev/null)" = 0 ] || return 1
+	[ "$(cat "$b/hidden" 2>/dev/null || echo 0)" = 0 ] || return 1
+	n=$(cat "$b/size" 2>/dev/null)
+	[ "${n:-0}" -gt 0 ] 2>/dev/null || return 1
+	# The device path names the bus: .../usb2/2-1/... for USB (UAS included),
+	# .../rport-2:0-0/... for Fibre Channel, .../session3/... for iSCSI.
+	case $(readlink -f "$b" 2>/dev/null) in
+	*/usb[0-9]*|*/rport-*|*/session[0-9]*)
+		return 1 ;;
+	esac
+	return 0
+}
+
+describe() { # describe <name> - "/dev/sda (447 GiB INTEL SSDSC2KB48)"
+	local b=$S/block/$1 n m
+	n=$(cat "$b/size" 2>/dev/null)
+	m=$(cat "$b/device/model" 2>/dev/null | sed 's/[[:space:]]*$//')
+	echo "$(node "$1") ($(( ${n:-0} / 2097152 )) GiB${m:+ $m})"
+}
+
+# under <sysfs dir> - the whole disk(s) a block device ultimately sits on:
+# a partition belongs to its parent disk, md and device-mapper devices to
+# whatever their slaves sit on.
+under() {
+	local d s found=
+	d=$(readlink -f "$1" 2>/dev/null) || return 0
+	if [ -e "$d/partition" ]; then
+		d=$(readlink -f "$d/.." 2>/dev/null)
+		echo "${d##*/}"
+		return 0
+	fi
+	for s in "$d"/slaves/*; do
+		[ -e "$s" ] || continue
+		found=1
+		under "$s"
+	done
+	[ -n "$found" ] || echo "${d##*/}"
+}
+
+# on_wiped <device> <disk>... - succeed if the device lives on one of them.
+on_wiped() {
+	local r u w
+	r=$(readlink -f "$1" 2>/dev/null) || return 1
+	r=$S/class/block/${r##*/}
+	[ -e "$r" ] || return 1
+	shift
+	for u in $(under "$r"); do
+		for w in "$@"; do
+			[ "$u" = "$w" ] && return 0
+		done
+	done
+	return 1
+}
+
+# unuse <disk>... - swapoff and unmount whatever lives on these disks. casper
+# swaps on every swap partition it finds on a local disk (its 13swap hook), so
+# on a reinstall the old system's swap is typically live in the installer.
+# Mounts go newest first, so a nested mount is released before its parent.
+unuse() {
+	local dev rest
+	while read -r dev rest; do
+		case $dev in /*) ;; *) continue ;; esac
+		on_wiped "$dev" "$@" || continue
+		say "releasing swap on $dev"
+		swapoff "$dev" 2>/dev/null || :
+	done < "$P/swaps"
+	sed '1!G;h;$!d' "$P/mounts" | while read -r dev rest; do
+		case $dev in /*) ;; *) continue ;; esac
+		on_wiped "$dev" "$@" || continue
+		say "unmounting $dev"
+		umount "$dev" 2>/dev/null || :
+	done
+}
+
+# release <sysfs dir> - stop md arrays and device-mapper devices (LVM,
+# dm-crypt, multipath) stacked on a disk or partition, deepest first.
+release() {
+	local h n
+	for h in "$1"/holders/*; do
+		[ -e "$h" ] || continue
+		n=${h##*/}
+		release "$S/block/$n"
+		case $n in
+		md*)
+			command -v mdadm >/dev/null 2>&1 &&
+				mdadm --stop "$(node "$n")" >/dev/null 2>&1 ;;
+		dm-*)
+			command -v dmsetup >/dev/null 2>&1 &&
+				dmsetup remove "$(cat "$S/block/$n/dm/name" 2>/dev/null)" >/dev/null 2>&1 ;;
+		esac
+	done
+}
+
+# parts <name> - the partition directories of a disk.
+parts() {
+	local p
+	for p in "$S/block/$1/$1"*; do
+		[ -e "$p/partition" ] && echo "$p"
+	done
+}
+
+# busy <name> - succeed if anything still holds the disk or a partition.
+busy() {
+	local p h
+	for p in "$S/block/$1" $(parts "$1"); do
+		for h in "$p"/holders/*; do
+			[ -e "$h" ] && return 0
+		done
+		grep -q "^$D/${p##*/}[[:space:]]" "$P/swaps" "$P/mounts" 2>/dev/null && return 0
+	done
+	return 1
+}
+
+# zero <node> <first sector> <sectors>
+zero() {
+	if [ $(($2 % 2048)) -eq 0 ] && [ $(($3 % 2048)) -eq 0 ]; then
+		dd if=/dev/zero of="$1" bs=1048576 seek=$(($2 / 2048)) count=$(($3 / 2048)) conv=notrunc 2>/dev/null
+	else
+		dd if=/dev/zero of="$1" bs=512 seek="$2" count="$3" conv=notrunc 2>/dev/null
+	fi
+}
+
+# edges <node> <first sector> <sectors> - zero both ends of a range, or all
+# of it when it is too small to have two separate ends.
+edges() {
+	if [ "$3" -le $((EDGE * 2)) ]; then
+		zero "$1" "$2" "$3"
+	else
+		zero "$1" "$2" "$EDGE" && zero "$1" $(($2 + $3 - EDGE)) "$EDGE"
+	fi
+}
+
+wipe() { # wipe <name>
+	local b=$S/block/$1 dev size p ok=1 how
+	dev=$(node "$1")
+	size=$(cat "$b/size")
+	for p in $(parts "$1"); do
+		edges "$dev" "$(cat "$p/start")" "$(cat "$p/size")" || ok=
+	done
+	edges "$dev" 0 "$size" || ok=
+	# Belt and braces: anything libblkid still recognises after the zeroing.
+	command -v wipefs >/dev/null 2>&1 && wipefs -a "$dev" >/dev/null 2>&1
+	how="signatures and partition tables zeroed"
+	if [ "$(cat "$b/queue/discard_max_bytes" 2>/dev/null || echo 0)" = 0 ]; then
+		how="$how; no discard support, so the rest of the disk is not overwritten"
+	# stdin from /dev/null: util-linux blkdiscard asks for -f only when it is
+	# talking to a terminal, and some installer shells are one.
+	elif command -v blkdiscard >/dev/null 2>&1 &&
+			blkdiscard "$dev" </dev/null >/dev/null 2>&1; then
+		how="$how, whole device discarded"
+	elif command -v python3 >/dev/null 2>&1 &&
+			python3 -c 'import fcntl, os, struct, sys
+fd = os.open(sys.argv[1], os.O_WRONLY)
+fcntl.ioctl(fd, 0x1277, struct.pack("QQ", 0, int(sys.argv[2]) * 512))' "$dev" "$size" >/dev/null 2>&1; then
+		how="$how, whole device discarded"
+	elif command -v blkdiscard >/dev/null 2>&1 || command -v python3 >/dev/null 2>&1; then
+		how="$how; discard FAILED, so the rest of the disk is not overwritten"
+	else
+		how="$how; no discard tool in this installer, so the rest of the disk is not overwritten"
+	fi
+	if [ -n "$ok" ]; then
+		say "wiped $(describe "$1"): $how"
+	else
+		say "WIPE INCOMPLETE on $(describe "$1"): a write failed"
+	fi
+}
+
+wanted() {
+	grep -qw 'fluxwipe=1' "${flux_cmdline:-$P/cmdline}" 2>/dev/null
+}
+
+command -v udevadm >/dev/null 2>&1 && udevadm settle --timeout=60 >/dev/null 2>&1
+
+set --
+for b in "$S"/block/*; do
+	[ -e "$b" ] || continue
+	eligible "${b##*/}" && set -- "$@" "${b##*/}"
+done
+
+if [ $# -eq 0 ]; then
+	say "no eligible install disk found - nothing chosen, nothing wiped"
+	exit 1
+fi
+
+say "install disk: $(describe "$1")"
+
+if wanted; then
+	say "fluxwipe=1: wiping every eligible disk before the install: $*"
+	unuse "$@"
+	for n in "$@"; do
+		for p in "$S/block/$n" $(parts "$n"); do
+			release "$p"
+		done
+	done
+	for n in "$@"; do
+		if busy "$n"; then
+			say "$(describe "$n") is still in use - NOT wiped"
+			continue
+		fi
+		wipe "$n" &
+	done
+	wait
+	sync
+	for n in "$@"; do
+		command -v blockdev >/dev/null 2>&1 && blockdev --rereadpt "$(node "$n")" >/dev/null 2>&1
+	done
+	command -v udevadm >/dev/null 2>&1 && udevadm settle --timeout=60 >/dev/null 2>&1
+else
+	say "no fluxwipe=1 on the kernel command line - no disk is wiped"
+fi
+
+node "$1"

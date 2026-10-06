@@ -109,9 +109,11 @@ sign() {
     -certfile "$CERTDIR/flux-ca.crt" -outform DER -out "$1.sig"
 }
 
-# Build the AUTOMATED-mode variant of a d-i initrd: the answer files ride as
-# an uncompressed cpio member PREPENDED to the vendor image, with the preseed
-# at /preseed.cfg - the AUTO-LOAD name. Both halves of that are load-bearing:
+# Build the AUTOMATED-mode variant of a d-i initrd: the answer files - and
+# /flux-disks, the disk rule the preseed's partman/early_command runs - ride
+# as an uncompressed cpio member PREPENDED to the vendor image, with the
+# preseed at /preseed.cfg - the AUTO-LOAD name. Both halves of that are
+# load-bearing:
 #
 #  - Prepended, because [plain cpio][vendor gzip] is the one concatenation
 #    layout the old 4.15/5.4 kernels are guaranteed to unpack (verified both
@@ -146,7 +148,8 @@ build_di_auto_initrd() {
       cp /s/preseed.cfg "$d/preseed.cfg"
       cp /s/flux-scrub  "$d/flux-scrub"
       cp /s/flux-scrub.service "$d/flux-scrub.service"
-      files="preseed.cfg\nflux-scrub\nflux-scrub.service\n"
+      cp /s/flux-disks  "$d/flux-disks"
+      files="preseed.cfg\nflux-scrub\nflux-scrub.service\nflux-disks\n"
       if [ -n "$GETMOD" ]; then
         # The module comes out of the full linux-modules POOL deb, not a -di
         # udeb: the netboot kernel is so old that its block-modules udeb has

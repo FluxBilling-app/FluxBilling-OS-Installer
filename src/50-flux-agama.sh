@@ -41,3 +41,48 @@ if [ -e /flux-agama.json ]; then
     echo "flux-agama: fluxhost resolved to '$_H'" > /dev/kmsg 2>/dev/null || :
     sed "s/@ZH@/$_H/g" /flux-agama.json > /run/flux-agama.json
 fi
+
+# @ZDISK@ -> the install disk, by the rule every automated entry shares
+# (src/flux-disks) - which, when the operator answered Yes on the menu's
+# erase-all-disks screen (fluxwipe=1), also wipes every disk first. It cannot
+# run here: this initrd need not have loaded every storage driver yet. And it
+# cannot run as an Agama pre-script either: agama.service probes storage the
+# moment it starts, before any profile is read, and a wipe after that probe
+# leaves it planning against partitions that no longer exist. So it runs as a
+# unit of its own in the live system, ordered Before=agama.service. /run is
+# the one place that survives the pivot, and systemd loads units from
+# /run/systemd/system once it re-executes in the new root.
+#
+# Automated mode only: without inst.auto no profile is read, and nothing may
+# choose or wipe a disk behind the operator's back. If the unit never runs,
+# the profile keeps @ZDISK@ - a drive Agama cannot find - and the install
+# stops there.
+if [ -e /flux-agama.json ] && [ -e /flux-disks ] && [ -n "$(getarg inst.auto= 2>/dev/null)" ]; then
+    cp /flux-disks /run/flux-disks
+    cat > /run/flux-agama-disks.sh <<'FLUXEOF'
+#!/bin/sh
+t=$(sh /run/flux-disks) || t=/dev/flux-no-fixed-disk-found
+sed -i "s|@ZDISK@|$t|" /run/flux-agama.json
+FLUXEOF
+    mkdir -p /run/systemd/system/multi-user.target.wants
+    cat > /run/systemd/system/flux-disks.service <<'FLUXEOF'
+[Unit]
+Description=FluxBilling: choose the install disk, wipe the disks if confirmed
+After=systemd-udev-trigger.service local-fs.target
+Before=agama.service agama-web-server.service agama-autoinstall.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Discarding a large SSD array can take minutes; a hung one must not hold
+# the installer forever - Agama then starts and stops at @ZDISK@.
+TimeoutStartSec=1800
+StandardOutput=journal+console
+StandardError=journal+console
+ExecStart=/bin/sh /run/flux-agama-disks.sh
+
+[Install]
+WantedBy=multi-user.target
+FLUXEOF
+    ln -sf ../flux-disks.service /run/systemd/system/multi-user.target.wants/flux-disks.service
+fi

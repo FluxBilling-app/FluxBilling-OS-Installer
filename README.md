@@ -107,11 +107,16 @@ answers (password as a SHA-512 hash, never plaintext at rest).
    Password:                           <- hidden (TAB to the field, ENTER)
    ```
 
-4. Review screen, fix any field, pick an OS. Done.
+4. Review screen, fix any field, pick an OS.
+5. Automated mode asks **Erase every disk and install?** — answer **Yes**.
+   The OS goes on the first disk and every disk in the server is wiped
+   first; see [Disks](#disks). The default is **No**, which goes back to the
+   OS menu without touching anything. Done.
 
 The OS menu opens with two toggles. **Install mode** switches **AUTOMATED**
-(answer files injected, zero-touch) and **MANUAL** (same installer, no answer
-file, driven by hand). **Installer output** picks which console the installer
+(answer files injected, zero-touch, every disk erased after you confirm) and
+**MANUAL** (same installer, no answer file, driven by hand — nothing is
+erased for you). **Installer output** picks which console the installer
 UI actually draws on - **SOL** (serial, the automated default and what a
 headless node gives you) or **Video** (the iDRAC/iLO/VNC screen, the manual
 default). Kernel messages go to both either way, so a video console left on
@@ -220,6 +225,56 @@ anything:
   compose is rejected and the origin is used instead — measured on a customer
   box whose unmetered 10 Gbps port still only pulled 0.8 MB/s from
   releases.ubuntu.com.
+
+## Disks
+
+**Automated mode installs to the first disk and wipes every disk in the
+server — after asking.** Picking an OS in AUTOMATED mode opens an
+*Erase every disk and install?* screen. **No** is the default and returns to
+the OS menu; **Yes** is the only thing that authorises a wipe (it adds
+`fluxwipe=1` to the kernel command line, and nothing is wiped without it).
+MANUAL mode never asks and never wipes: the installer is yours to drive.
+
+One rule, [src/flux-disks](src/flux-disks), decides for every entry, so
+Ubuntu, Debian, the EL family, openSUSE and Proxmox all agree on which disk
+is "first" (Ubuntu 22.04+ used to take the *largest* disk, and Leap whatever
+its proposal settled on):
+
+- **First** means the first eligible whole disk in kernel-name order — the
+  order `/sys/block` sorts in: `nvme0n1` before `nvme1n1`, NVMe before
+  SATA/SAS/RAID volumes (`sda`, `sdb`, …), those before virtio (`vda`). On a
+  box that mixes NVMe with a RAID volume or a BOSS card, the OS therefore
+  goes on `nvme0n1`.
+- **Never touched**, never chosen: removable media, anything attached over
+  USB (including the stick this ISO was booted from and BMC virtual media),
+  Fibre Channel and iSCSI LUNs (shared storage is someone else's data),
+  read-only and empty devices, and virtual devices (loop, zram, md, dm, …).
+- **The wipe** runs before the installer looks at the disks. It stops
+  whatever lives on them (swap, md arrays, LVM, dm-crypt), zeroes the first
+  and last 16 MiB of every partition and of every disk — partition tables
+  (MBR and both GPT copies), RAID metadata, LVM, ZFS labels, LUKS headers and
+  filesystem superblocks — and then discards the whole device on SSD and
+  NVMe, which drops the data itself. It takes seconds to a few minutes, not
+  hours.
+- **What it does not do:** overwrite the rest of a spinning disk. The old
+  data in the middle of an HDD is unreachable by any OS but recoverable with
+  forensic tools. If that matters, run a dedicated erase (`hdparm`
+  security erase, `nvme format -s1`, `shred`) before installing.
+- A disk that is still busy after all that — something the installer itself
+  depends on — is skipped, not pulled out from under it, and the log says so.
+- No eligible disk at all: nothing is wiped, and the installer stops (d-i
+  at its own disk question) rather than guess.
+
+The installer logs what it chose and what it wiped — `FluxBilling: install
+disk: …` and `FluxBilling: wiped …` in the kernel log (`dmesg`) and the
+installer's own log. [src/disks-test.sh](src/disks-test.sh) proves the rule
+against a fake `/sys` and `/dev` under dash, bash and d-i's busybox, and holds
+every installer's copy of it to the one file.
+
+The Ubuntu 18.04/20.04 and Proxmox entries carry their answer files inside
+the signed `boot-*` release images, so they follow this rule once that
+release is cut with the current `src/sign-boot-images.sh`; an image cut
+before it installs to the first disk without wiping the others.
 
 ## Requirements & limits
 

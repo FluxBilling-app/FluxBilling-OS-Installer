@@ -234,6 +234,15 @@ imgargs autoinst.xml flux-autoinst.xml ||
 # answer files, so this rides along unread there.
 imgargs flux-scrub flux-scrub ||
 imgargs flux-scrub.service flux-scrub.service ||
+# The disk rule every automated entry shares (src/flux-disks): the OS goes on
+# the FIRST disk, and once the operator answers Yes on :confirm_wipe, every
+# disk is wiped before the installer looks at them. d-i and YaST run it
+# straight from the initrd root; casper's seed hook copies it into the live
+# root and the Agama pre-pivot hook into /run, because those installers run
+# after switch_root. anaconda and the Proxmox hook carry verbatim copies
+# instead - nothing appended here survives into either - and
+# src/disks-test.sh holds every copy to this one.
+imgargs flux-disks flux-disks mode=755 ||
 # Agama is the one family whose installer runs AFTER switch_root, so a profile
 # at the initrd root is gone by the time inst.auto is read - and /run there is
 # a tmpfs mount that would shadow an injected file anyway. So the profile goes
@@ -499,6 +508,9 @@ goto os_pick
 # populates the per-family answer-file args just below, manual wipes them - so
 # each entry pulls and boots the identical installer, only interactively.
 :os_pick
+# The wipe authorisation is per boot attempt: set by :confirm_wipe, dropped on
+# every return to this menu, so backing out of a failed boot asks again.
+clear wipe_kargs
 isset ${amode} || set amode auto
 iseq ${amode} manual && goto kargs_manual ||
 set mode_lbl AUTOMATED
@@ -582,6 +594,42 @@ item pve9 Proxmox VE 9
 item pve8 Proxmox VE 8
 item settings Back to settings
 choose --default ubu2604 pick || goto os_pick
+# The toggles and "Back to settings" stay in the menu loop. An AUTOMATED
+# install erases disks, so it goes through :confirm_wipe first; a MANUAL one
+# boots straight in - its installer asks its own questions.
+iseq ${pick} toggle_con && goto toggle_con ||
+iseq ${pick} toggle_mode && goto toggle_mode ||
+iseq ${pick} settings && goto settings ||
+iseq ${amode} manual && goto ${pick} ||
+goto confirm_wipe
+
+# ---- The erase-all-disks question --------------------------------------------
+# AUTOMATED installs put the OS on the FIRST disk and wipe EVERY disk before
+# the installer starts - the first one and all the others - so nothing boots
+# until the operator says yes. "No" is the default: a stray ENTER, or ESC,
+# goes back to the OS menu and touches nothing. "Yes" is the only place
+# fluxwipe=1 is ever set; it rides every kernel line below as ${wipe_kargs},
+# and src/flux-disks wipes nothing without it. That also keeps an older ISO
+# safe when it boots a newer signed boot image: no question asked, no flag,
+# no wipe.
+#
+# iPXE cannot see the disks, so this screen states the rule rather than
+# listing drives. The installer logs what it chose and what it wiped - the
+# "FluxBilling: install disk:" and "FluxBilling: wiped" lines in the kernel
+# log and on the console.
+:confirm_wipe
+menu Erase every disk and install?
+item --gap AUTOMATED mode erases EVERY disk in this server.
+item --gap The operating system goes on the FIRST disk, and all
+item --gap the other disks are wiped as well - all data on all
+item --gap of them is lost. USB sticks and virtual media are not
+item --gap touched.
+item --gap
+item wipe_no No - back to the OS menu
+item wipe_yes Yes - erase every disk and install
+choose --default wipe_no wipe || goto os_pick
+iseq ${wipe} wipe_yes || goto os_pick
+set wipe_kargs fluxwipe=1
 goto ${pick}
 
 :toggle_mode
@@ -633,7 +681,7 @@ set kurl ${img${rtag}}
 # unmount-and-panic path. With url= naming the exact medium there is nothing
 # for the UUID test to protect - it exists to stop a LOCAL device scan
 # adopting a stranger's live filesystem.
-kernel --name kboot ${kbase}/${kname} initrd=initrd.magic ${net_kargs} url=${kurl} ignore_uuid ${ubu_auto} ${vga_kargs} ${con_kargs} || goto casper_fallback
+kernel --name kboot ${kbase}/${kname} initrd=initrd.magic ${net_kargs} url=${kurl} ignore_uuid ${ubu_auto} ${wipe_kargs} ${vga_kargs} ${con_kargs} || goto casper_fallback
 set iurl ${kbase}/initrd
 goto launch
 
@@ -744,12 +792,12 @@ goto boot_di
 # mode boots: it would re-arm automated partitioning on a manual install.
 set di_img ubuntu-${dver}-initrd
 isset ${di_auto} && set di_img ubuntu-${dver}-auto-initrd ||
-kernel --name kboot ${flux_boot}/${flux_rel}/ubuntu-${dver}-vmlinuz initrd=initrd.magic ${di_net} mirror/country=manual mirror/http/hostname=${di_host} mirror/http/directory=${mir_dir} mirror/http/proxy= ${di_auto_flux} ${vga_kargs} ${con_kargs} || goto boot_fail
+kernel --name kboot ${flux_boot}/${flux_rel}/ubuntu-${dver}-vmlinuz initrd=initrd.magic ${di_net} mirror/country=manual mirror/http/hostname=${di_host} mirror/http/directory=${mir_dir} mirror/http/proxy= ${di_auto_flux} ${wipe_kargs} ${vga_kargs} ${con_kargs} || goto boot_fail
 set iurl ${flux_boot}/${flux_rel}/${di_img}
 goto launch
 
 :boot_di
-kernel --name kboot http://${di_host}${di_path}/linux initrd=initrd.magic ${di_net} mirror/country=manual mirror/http/hostname=${di_host} mirror/http/directory=${mir_dir} mirror/http/proxy= ${di_auto} ${vga_kargs} ${con_kargs} || goto di_fallback
+kernel --name kboot http://${di_host}${di_path}/linux initrd=initrd.magic ${di_net} mirror/country=manual mirror/http/hostname=${di_host} mirror/http/directory=${mir_dir} mirror/http/proxy= ${di_auto} ${wipe_kargs} ${vga_kargs} ${con_kargs} || goto di_fallback
 set iurl http://${di_host}${di_path}/initrd.gz
 goto launch
 
@@ -824,7 +872,7 @@ set ks_sch http
 # ks_base is scheme-less. iPXE pulls vmlinuz/initrd over ${ks_sch}; anaconda
 # pulls stage2 + every package over https, and ks.cfg builds the AppStream
 # baseurl from fluxrepo, so that one needs the scheme spelled out too.
-kernel --name kboot ${ks_sch}://${ks_base}/BaseOS/x86_64/os/images/pxeboot/vmlinuz initrd=initrd.magic ${net_kargs} inst.repo=https://${ks_base}/BaseOS/x86_64/os/ fluxrepo=https://${ks_base} inst.text ${ks_auto} ${vga_kargs} ${con_kargs} || goto boot_fail
+kernel --name kboot ${ks_sch}://${ks_base}/BaseOS/x86_64/os/images/pxeboot/vmlinuz initrd=initrd.magic ${net_kargs} inst.repo=https://${ks_base}/BaseOS/x86_64/os/ fluxrepo=https://${ks_base} inst.text ${ks_auto} ${wipe_kargs} ${vga_kargs} ${con_kargs} || goto boot_fail
 set iurl ${ks_sch}://${ks_base}/BaseOS/x86_64/os/images/pxeboot/initrd.img
 goto launch
 
@@ -854,13 +902,13 @@ set otag 8
 goto boot_ol
 
 :boot_ol
-kernel --name kboot ${flux_boot}/${flux_rel}/oracle-${otag}-vmlinuz initrd=initrd.magic ${net_kargs} inst.stage2=${flux_boot}/${flux_rel}-ol${otag} inst.repo=https://${ol_repo}/OL${otag}/baseos/latest/x86_64/ fluxappst=https://${ol_repo}/OL${otag}/appstream/x86_64/ inst.text ${ks_auto} ${vga_kargs} ${con_kargs} || goto boot_fail
+kernel --name kboot ${flux_boot}/${flux_rel}/oracle-${otag}-vmlinuz initrd=initrd.magic ${net_kargs} inst.stage2=${flux_boot}/${flux_rel}-ol${otag} inst.repo=https://${ol_repo}/OL${otag}/baseos/latest/x86_64/ fluxappst=https://${ol_repo}/OL${otag}/appstream/x86_64/ inst.text ${ks_auto} ${wipe_kargs} ${vga_kargs} ${con_kargs} || goto boot_fail
 set iurl ${flux_boot}/${flux_rel}/oracle-${otag}-initrd
 goto launch
 
 # ---- openSUSE Leap 15.6 - linuxrc/YaST, AutoYaST read from the injected initrd file ----
 :leap156
-kernel --name kboot http://${leap156_url}/boot/x86_64/loader/linux initrd=initrd.magic install=https://${leap156_url} ifcfg=*=${ip}/${plen},${gwip},${ns1} hostname=${hostnm} textmode=1 ${ay_auto} ${vga_kargs} ${con_kargs} || goto boot_fail
+kernel --name kboot http://${leap156_url}/boot/x86_64/loader/linux initrd=initrd.magic install=https://${leap156_url} ifcfg=*=${ip}/${plen},${gwip},${ns1} hostname=${hostnm} textmode=1 ${ay_auto} ${wipe_kargs} ${vga_kargs} ${con_kargs} || goto boot_fail
 set iurl http://${leap156_url}/boot/x86_64/loader/initrd
 goto launch
 
@@ -873,7 +921,7 @@ goto launch
 # https://<ip>, log in as root with the password typed into the menu
 # (${ag_live} carries it in manual mode ONLY - see the note at :os_pick).
 :leap160
-kernel --name kboot http://${leap160_url}/boot/x86_64/loader/linux initrd=initrd.magic root=live:https://${leap160_live} rd.neednet=1 ${net_kargs} ${ag_live} ${ag_auto} ${vga_kargs} ${con_kargs} || goto boot_fail
+kernel --name kboot http://${leap160_url}/boot/x86_64/loader/linux initrd=initrd.magic root=live:https://${leap160_live} rd.neednet=1 ${net_kargs} ${ag_live} ${ag_auto} ${wipe_kargs} ${vga_kargs} ${con_kargs} || goto boot_fail
 set iurl http://${leap160_url}/boot/x86_64/loader/initrd
 goto launch
 
@@ -899,7 +947,7 @@ set piso ${pve8_iso}
 goto boot_pve
 
 :boot_pve
-kernel --name kboot ${flux_boot}/${flux_rel}/proxmox-${ptag}-vmlinuz initrd=initrd.magic ramdisk_size=16777216 rw quiet ${pv_auto} ${net_kargs} ${vga_kargs} ${con_kargs} || goto boot_fail
+kernel --name kboot ${flux_boot}/${flux_rel}/proxmox-${ptag}-vmlinuz initrd=initrd.magic ramdisk_size=16777216 rw quiet ${pv_auto} ${wipe_kargs} ${net_kargs} ${vga_kargs} ${con_kargs} || goto boot_fail
 initrd --name iboot ${flux_boot}/${flux_rel}/proxmox-${ptag}-initrd || goto boot_fail
 set got_i 1
 initrd --name pviso http://${pve_host}/iso/${piso} proxmox.iso || goto boot_fail
