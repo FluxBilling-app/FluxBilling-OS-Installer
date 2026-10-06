@@ -113,7 +113,7 @@ grep -q "INSTALL FAILED" "$WORK/dev/tty0" \
 # /etc/conf.d. EVERY stage sources that snippet, and dracut's sh is bash in
 # POSIX mode, where a `.` file that does not parse ends the sourcing script -
 # so a typo here would stop every dracut install cold, not just the banner.
-for f in src/flux-fail.conf src/50-flux-fail.sh; do
+for f in src/flux-fail.conf src/50-flux-fail.sh src/flux-giveup.sh; do
 	bash --posix -n "$f" 2>/dev/null && ok "$f parses as POSIX-mode bash" \
 		|| fail "$f does not parse - a dracut stage that sources it would die"
 	if command -v dash >/dev/null 2>&1; then
@@ -124,10 +124,11 @@ done
 
 # Source it the way dracut's source_conf does, with $hookdir pointing at a
 # stand-in hook tree.
-mkdir -p "$WORK/hooks/emergency"
+mkdir -p "$WORK/hooks/emergency" "$WORK/hooks/initqueue"
 cp ./src/50-flux-fail.sh "$WORK/flux-fail.sh"
+cp ./src/flux-giveup.sh "$WORK/flux-giveup.sh"
 source_flux_conf() { # <hookdir> -> prints the status the snippet left behind
-	hookdir=$1 flux_fail_hook="$WORK/flux-fail.sh" \
+	hookdir=$1 flux_fail_hook="$WORK/flux-fail.sh" flux_giveup_job="$WORK/flux-giveup.sh" \
 		bash --posix -c '. ./src/flux-fail.conf; echo "$?"' 2>/dev/null
 }
 rc=$(source_flux_conf "$WORK/hooks")
@@ -136,6 +137,9 @@ if [ "$rc" = 0 ] && cmp -s "$WORK/hooks/emergency/50-flux-fail.sh" ./src/50-flux
 else
 	fail "conf.d snippet did not install the hook (status '$rc')"
 fi
+cmp -s "$WORK/hooks/initqueue/flux-giveup.sh" ./src/flux-giveup.sh \
+	&& ok "conf.d snippet installs the time limit into \$hookdir/initqueue" \
+	|| fail "conf.d snippet did not install flux-giveup.sh into \$hookdir/initqueue"
 rc=$(source_flux_conf "$WORK/hooks")
 [ "$rc" = 0 ] && ok "sourcing it again (every later stage does) still succeeds" \
 	|| fail "re-sourcing the conf.d snippet returned '$rc'"
@@ -155,8 +159,13 @@ fi
 # arguments - so the operator gets the default reason, not an empty one.
 : > "$WORK/dev/tty0"; : > "$WORK/dev/ttyS0"
 printf 'ttyS0                -W- (EC p  a)    4:64\ntty0                 -WU (EC p  )    4:1\n' > "$WORK/consoles"
-( export flux_devdir="$WORK/dev" flux_proc_consoles="$WORK/consoles" hd="$WORK/hooks/emergency"
-  bash --posix -c 'for f in "$hd"/*.sh; do [ -e "$f" ] && . "$f"; done' >/dev/null 2>&1 )
+mkdir -p "$WORK/run"
+run_dracut_hooks() { # sources every installed emergency hook, no arguments
+	( export flux_devdir="$WORK/dev" flux_proc_consoles="$WORK/consoles" flux_run="$WORK/run" \
+		hd="$WORK/hooks/emergency"
+	  bash --posix -c 'for f in "$hd"/*.sh; do [ -e "$f" ] && . "$f"; done' >/dev/null 2>&1 )
+}
+run_dracut_hooks
 for c in tty0 ttyS0; do
 	if grep -q "INSTALL FAILED" "$WORK/dev/$c" 2>/dev/null; then
 		ok "installed hook, run as dracut runs it, reached /dev/$c"
@@ -167,6 +176,138 @@ done
 grep -q "stopped without a message" "$WORK/dev/tty0" \
 	&& ok "dracut passes no reason, so the banner falls back to its default" \
 	|| fail "the hook printed no reason line when dracut passed none"
+
+# With no reason file, anaconda's own last critical error is the next best
+# thing to show (EL9/EL10 log them; EL8 does not, and gets the default).
+mkdir -p "$WORK/run/anaconda"
+printf 'inst.ks=hd:sdz:/ks.cfg\nanaconda: failed to fetch stage2 from https://mirror.example.org/os\n' \
+	> "$WORK/run/anaconda/initrd_errors.txt"
+: > "$WORK/dev/tty0"; : > "$WORK/dev/ttyS0"
+run_dracut_hooks
+grep -q "Reason: anaconda: failed to fetch stage2 from https://mirror.example.org/os" "$WORK/dev/ttyS0" \
+	&& ok "no reason file: the banner shows anaconda's last critical error" \
+	|| fail "no reason file: the banner did not fall back to anaconda's last error"
+rm -rf "$WORK/run/anaconda"
+
+# --- dracut half, the time limit: src/flux-giveup.sh -------------------------
+# anaconda retries an unreachable stage2 on every initqueue pass and dracut
+# only counts passes, so without this job the banner above is hours or days
+# away (the header of src/flux-giveup.sh has the numbers). dracut-initqueue
+# SOURCES the job in its main loop on every pass, so drive it exactly that
+# way: a loop shell with its own variables, a fake clock, a fake journal and a
+# fake emergency_shell - and that shell must still be alive afterwards.
+G="$WORK/giveup"; mkdir -p "$G/run" "$G/curl"
+# What a real EL9 boot logs: curl's error is glued to the end of its progress
+# meter, on the same \r-separated journal line.
+cat > "$WORK/bin/journalctl" <<'J'
+#!/bin/sh
+m='\r  0     0    0     0    0     0      0      0 --:--:--  0:00:20 --:--:--     0'
+echo "Warning: can't find installer main image path in .treeinfo"
+printf "$m%s\r\r\n" "curl: (28) Resolving timed out after 30000 milliseconds"
+echo "Warning: Downloading 'https://mirror.example.org/9/BaseOS/x86_64/os/images/install.img' failed!"
+printf "$m%s\r\r\n" "curl: (6) Could not resolve host: mirror.example.org"
+echo "Warning: anaconda: failed to fetch stage2 from https://mirror.example.org/9/BaseOS/x86_64/os"
+J
+chmod +x "$WORK/bin/journalctl"
+GROOT="anaconda-net:https://mirror.example.org/9/BaseOS/x86_64/os/"
+giveup_pass() { # <uptime seconds> [<$root>] -> the loop shell's output
+	printf '%s.42 1.00\n' "$1" > "$G/uptime"
+	( export PATH="$WORK/bin:$PATH" flux_run="$G/run" flux_proc_uptime="$G/uptime" \
+		flux_dev_root="$G/devroot" CURL_HOME="$G/curl" root="${2-$GROOT}" G
+	  bash --posix -c 'emergency_shell() { echo "$*" >> "$G/emergency"; }
+		main_loop=7; job="$G/self"
+		. ./src/flux-giveup.sh
+		echo "alive main_loop=$main_loop job=${job##*/}"' 2>&1 )
+}
+alive="alive main_loop=7 job=self"
+out=$(giveup_pass 100 "livenet")
+if [ "$out" = "$alive" ] && [ ! -e "$G/run/flux-giveup.at" ] && [ ! -e "$G/curl/.curlrc" ]; then
+	ok "time limit stays out of a boot that is not an anaconda network install"
+else
+	fail "time limit acted on a non-anaconda boot: '$out'"
+fi
+out=$(giveup_pass 100)
+read -r at _ < "$G/run/flux-giveup.at" 2>/dev/null
+[ "$out" = "$alive" ] && [ "$at" = 400 ] \
+	&& ok "first pass arms a 300 s budget, quietly, and leaves the loop alone" \
+	|| fail "first pass: output '$out', deadline '$at' (want 400)"
+grep -qx 'connect-timeout = 30' "$G/curl/.curlrc" 2>/dev/null &&
+	grep -qx 'retry-max-time = 1' "$G/curl/.curlrc" 2>/dev/null \
+	&& ok "first pass caps curl's connect time and in-fetch retries via \$CURL_HOME/.curlrc" \
+	|| fail "first pass did not write the curl caps to \$CURL_HOME/.curlrc"
+out=$(giveup_pass 399)
+[ "$out" = "$alive" ] && [ ! -e "$G/emergency" ] \
+	&& ok "a pass inside the budget does nothing" \
+	|| fail "a pass inside the budget gave up or printed: '$out'"
+: > "$G/devroot"
+out=$(giveup_pass 900)
+[ "$out" = "$alive" ] && [ ! -e "$G/emergency" ] \
+	&& ok "image in place (/dev/root exists): never gives up, however late" \
+	|| fail "gave up although /dev/root exists: '$out'"
+rm -f "$G/devroot"
+out=$(giveup_pass 400)
+read -r at _ < "$G/run/flux-giveup.at" 2>/dev/null
+[ "$(wc -l < "$G/emergency" 2>/dev/null)" -eq 1 ] \
+	&& ok "budget spent: dracut's emergency shell is opened, once" \
+	|| fail "budget spent: emergency_shell was not called exactly once"
+grep -q "giving up" "$G/emergency" 2>/dev/null && grep -q "mirror.example.org" "$G/emergency" \
+	&& ok "the emergency warning names the mirror it gave up on" \
+	|| fail "the emergency warning does not name the mirror: '$(cat "$G/emergency" 2>/dev/null)'"
+[ "$out" = "$alive" ] \
+	&& ok "giving up returns to dracut's loop with its variables untouched" \
+	|| fail "the loop shell did not survive the give-up: '$out'"
+[ "$at" = 700 ] && ok "exiting the shell starts a new budget (operator fixed the link)" \
+	|| fail "after the shell, the deadline is '$at', want 700"
+out=$(giveup_pass 401)
+[ "$(wc -l < "$G/emergency")" -eq 1 ] \
+	&& ok "the pass after the shell retries instead of reopening it" \
+	|| fail "the pass after the shell reopened the emergency shell"
+R="$G/run/flux-fail.reason"
+grep -qx "no installer image from mirror.example.org after 5 minutes" "$R" 2>/dev/null \
+	&& ok "reason file says what failed, from which host, and for how long" \
+	|| fail "reason file is missing the what/where/how-long: '$(cat "$R" 2>/dev/null)'"
+grep -qx "curl: (6) Could not resolve host: mirror.example.org" "$R" 2>/dev/null \
+	&& ok "reason file carries curl's LAST error from the journal" \
+	|| fail "reason file lacks curl's last error: '$(cat "$R" 2>/dev/null)'"
+# Measured on an 80x25 BIOS text console: the banner plus the emergency text
+# under it (EL10's sulogin prompt included) leave room for three reason rows
+# before the title scrolls off the top. Two keeps a row in hand.
+[ "$(wc -l < "$R")" -le 2 ] && ok "reason stays within two lines" \
+	|| fail "reason is $(wc -l < "$R") lines - the title could scroll off an 80x25 screen"
+cp "$R" "$R.keep"
+out=$(giveup_pass 1000 "anaconda-net:https://mirror.stream.centos.org/10-stream/BaseOS/x86_64/os/")
+first=$(head -n 1 "$R")
+mv "$R.keep" "$R"
+[ "${#first}" -le 70 ] \
+	&& ok "first reason line fits 70 columns even for the longest mirror host (${#first})" \
+	|| fail "first reason line is ${#first} columns, the banner would cut it: '$first'"
+
+# What the operator reads: the banner, run as dracut-emergency runs it, picks
+# that file up - every line of it, on both consoles.
+: > "$WORK/dev/tty0"; : > "$WORK/dev/ttyS0"
+cp "$R" "$WORK/run/flux-fail.reason"
+run_dracut_hooks
+for c in tty0 ttyS0; do
+	if grep -q "Reason: no installer image from mirror.example.org after 5 minutes" "$WORK/dev/$c" &&
+		grep -q "^          curl: (6) Could not resolve host" "$WORK/dev/$c"; then
+		ok "time-limit banner with the full reason reached /dev/$c"
+	else
+		fail "time-limit banner or its reason lines missing on /dev/$c"
+	fi
+done
+# A reason from elsewhere can be long - Oracle's stage2 lives on a ~100-char
+# GitHub release URL - and a row that wraps costs a screen row, so the banner
+# cuts every reason row to fit 80 columns.
+: > "$WORK/dev/tty0"
+{ echo "anaconda: failed to fetch stage2 from https://github.com/FluxBilling-app/FluxBilling-OS-Installer/releases/download/boot-20260815-ol9"
+  echo "curl: (35) OpenSSL SSL_connect: SSL_ERROR_SYSCALL in connection to github.com:443"
+} > "$WORK/run/flux-fail.reason"
+run_dracut_hooks
+long=$(awk 'length > 80' "$WORK/dev/tty0")
+[ -z "$long" ] && grep -q "from https://github.com/" "$WORK/dev/tty0" \
+	&& ok "a long reason line is cut to one 80-column row" \
+	|| fail "banner row wider than 80 columns: '$long'"
+rm -f "$WORK/run/flux-fail.reason"
 
 # The menu has to put both files where the snippet expects them, and must not
 # stamp ANY path through a directory the vendor initrds ship as a symlink:
@@ -182,6 +323,14 @@ want_hook=$(sed -n 's|.*${flux_fail_hook:-/\([^}]*\)}.*|\1|p' src/flux-fail.conf
 [ -n "$hook_path" ] && [ "$hook_path" = "$want_hook" ] \
 	&& ok "menu puts the hook where the snippet copies it from (/$hook_path)" \
 	|| fail "menu puts the hook at '$hook_path', the snippet copies '/$want_hook'"
+job_path=$(sed -n 's|^imgargs flux-giveup\.sh \([^ ]*\).*|\1|p' fluxbilling.ipxe)
+want_job=$(sed -n 's|.*${flux_giveup_job:-/\([^}]*\)}.*|\1|p' src/flux-fail.conf)
+[ -n "$job_path" ] && [ "$job_path" = "$want_job" ] \
+	&& ok "menu puts the time limit where the snippet copies it from (/$job_path)" \
+	|| fail "menu puts flux-giveup.sh at '$job_path', the snippet copies '/$want_job'"
+grep -q '/work/flux-giveup\.sh' build.sh \
+	&& ok "build.sh embeds flux-giveup.sh" \
+	|| fail "build.sh does not embed flux-giveup.sh - the menu would stamp nothing"
 bad=$(sed -n 's|^imgargs [^ ]* \([^ ]*\).*|\1|p' fluxbilling.ipxe |
 	grep -E '^(lib|lib64|bin|sbin)/|^usr/lib/dracut/hooks/' | tr '\n' ' ')
 [ -z "$bad" ] && ok "no injected path runs through a vendor symlink" \

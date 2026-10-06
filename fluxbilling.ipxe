@@ -267,8 +267,17 @@ imgargs 50-flux-agama.sh var/lib/dracut/hooks/pre-pivot/50-flux-agama.sh mode=75
 # dracut has resolved its own hook path. mkdir= is safe on that one because
 # /etc is a real directory in every initrd and /etc/conf.d in every dracut
 # one. Initramfs flavours that are not dracut never read either file.
+# flux-giveup.sh rides in the same way and lands in $hookdir/initqueue. It is
+# what gets the anaconda entries to that banner when the mirror or the network
+# is unreachable: anaconda retries stage2 on every initqueue pass, dracut only
+# gives up after 2 x rd.retry passes, and with nothing answering a pass takes
+# 25 seconds to 15 minutes - so the shell was hours to days away. The job
+# gives up on the clock instead (src/flux-giveup.sh has the numbers). An
+# rd.retry= on these kernel lines could not do that: it shortens the count,
+# not the passes.
 imgargs 50-flux-fail.sh flux-fail.sh mode=755 ||
 imgargs flux-fail.conf etc/conf.d/flux-fail.conf mkdir=-1 ||
+imgargs flux-giveup.sh flux-giveup.sh ||
 # Proxmox automated-install hook. The one family whose installer offers no
 # answer-file argument at all on a stock ISO: unconfigured.sh only runs
 # proxmox-fetch-answer when /cdrom/auto-installer-mode.toml exists, a file

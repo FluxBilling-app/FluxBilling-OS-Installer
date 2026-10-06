@@ -182,9 +182,22 @@ anything:
   before dracut opens its emergency shell. dracut keeps that hook directory
   under `usr/lib` on EL8/EL9 and under `var/lib` on EL10 and Leap 16, and no
   injected path reaches both — so a small `/etc/conf.d` snippet copies the
-  hook into whichever one dracut itself uses, at boot. Resetting the server is
-  what returns you to the boot menu — iPXE is gone once a kernel is running,
-  so there is no way back to it from inside the installer.
+  hook into whichever one dracut itself uses, at boot. The anaconda entries
+  also have to get *to* that shell when the mirror or the network is down,
+  which stock dracut does not do in any useful time: anaconda retries its
+  installer image on every pass of dracut's initqueue, and dracut gives up
+  only after 360 passes — a count, not a clock. With nothing answering, one
+  pass is a stack of curl timeouts; measured on Alma 9 that put the shell
+  2½ hours (mirror refusing connections) to almost four days (every SYN
+  dropped) away, with nothing on screen but `failed to fetch stage2`
+  scrolling past. [src/flux-giveup.sh](src/flux-giveup.sh), installed by the
+  same snippet, gives up after five minutes of failed passes instead, caps
+  each curl attempt so a pass cannot overshoot by much, and puts the mirror
+  host and curl's last error in the banner. A download that is still running
+  is never cut short, and exiting the shell (manual mode) retries for another
+  five minutes. Resetting the server is what returns you to the boot menu —
+  iPXE is gone once a kernel is running, so there is no way back to it from
+  inside the installer.
   [src/console-ux-test.sh](src/console-ux-test.sh) asserts all of that,
   including the case that caused the original bug: only `ttyS0` registered,
   banner still reaches the video console.
