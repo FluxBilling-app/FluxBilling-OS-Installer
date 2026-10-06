@@ -195,9 +195,16 @@ anything:
   each curl attempt so a pass cannot overshoot by much, and puts the mirror
   host and curl's last error in the banner. A download that is still running
   is never cut short, and exiting the shell (manual mode) retries for another
-  five minutes. Resetting the server is what returns you to the boot menu —
-  iPXE is gone once a kernel is running, so there is no way back to it from
-  inside the installer.
+  five minutes. Leap 16.0 had the same hole in a different place: dracut's
+  livenet module fetches the Agama ISO inside a *single* initqueue pass —
+  100 tries, 5 s apart — and in QEMU each try took 92 s with DNS unreachable
+  and 5 minutes with every SYN dropped, so that one pass ran 2½ to 8½ hours
+  before dracut even started counting its passes. The same job hands that
+  loop ten tries instead, under the same curl caps, and opens the shell on
+  the very next pass: the banner came 4 minutes after the first try with DNS
+  down and 6 with every SYN dropped. Resetting the server is what returns
+  you to the boot menu — iPXE is gone once a kernel is running, so there is
+  no way back to it from inside the installer.
   [src/console-ux-test.sh](src/console-ux-test.sh) asserts all of that,
   including the case that caused the original bug: only `ttyS0` registered,
   banner still reaches the video console.

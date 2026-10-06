@@ -53,11 +53,16 @@ for d in $(awk '{print $1}' "${flux_proc_consoles:-/proc/consoles}" 2>/dev/null)
 			done
 		}
 		printf '  Nothing has been written to the target disk.\n'
-		printf '\n'
+		# No blank row from here down, unlike the casper banner: on the
+		# console the shell lands on, dracut adds a warning, ten rows of
+		# emergency text and sulogin's two-row prompt under this - measured on
+		# Leap 16.0 in MANUAL (video) mode, that left the title on the top row,
+		# and pressing Enter for the shell scrolled it off. Every row under
+		# the title counts; the ones above it do not.
 		printf '  The server is HELD here on purpose - it will not\n'
 		printf '  reboot on its own. Reset it (or Ctrl-Alt-Del) to\n'
 		printf '  return to the FluxBilling boot menu and pick an\n'
 		printf '  entry again.\n'
-		printf '======================================================\n\n'
+		printf '======================================================\n'
 	} > "$dev" 2>/dev/null
 done

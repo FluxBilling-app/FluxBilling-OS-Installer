@@ -127,32 +127,34 @@ done
 mkdir -p "$WORK/hooks/emergency" "$WORK/hooks/initqueue"
 cp ./src/50-flux-fail.sh "$WORK/flux-fail.sh"
 cp ./src/flux-giveup.sh "$WORK/flux-giveup.sh"
+# The snippet's own status goes in $st, never $rc: $rc is this script's verdict,
+# and overwriting it with a 0 here would pass a run that already failed.
 source_flux_conf() { # <hookdir> -> prints the status the snippet left behind
 	hookdir=$1 flux_fail_hook="$WORK/flux-fail.sh" flux_giveup_job="$WORK/flux-giveup.sh" \
 		bash --posix -c '. ./src/flux-fail.conf; echo "$?"' 2>/dev/null
 }
-rc=$(source_flux_conf "$WORK/hooks")
-if [ "$rc" = 0 ] && cmp -s "$WORK/hooks/emergency/50-flux-fail.sh" ./src/50-flux-fail.sh; then
+st=$(source_flux_conf "$WORK/hooks")
+if [ "$st" = 0 ] && cmp -s "$WORK/hooks/emergency/50-flux-fail.sh" ./src/50-flux-fail.sh; then
 	ok "conf.d snippet installs the hook into \$hookdir/emergency"
 else
-	fail "conf.d snippet did not install the hook (status '$rc')"
+	fail "conf.d snippet did not install the hook (status '$st')"
 fi
 cmp -s "$WORK/hooks/initqueue/flux-giveup.sh" ./src/flux-giveup.sh \
 	&& ok "conf.d snippet installs the time limit into \$hookdir/initqueue" \
 	|| fail "conf.d snippet did not install flux-giveup.sh into \$hookdir/initqueue"
-rc=$(source_flux_conf "$WORK/hooks")
-[ "$rc" = 0 ] && ok "sourcing it again (every later stage does) still succeeds" \
-	|| fail "re-sourcing the conf.d snippet returned '$rc'"
-rc=$(env -u hookdir flux_fail_hook="$WORK/flux-fail.sh" \
+st=$(source_flux_conf "$WORK/hooks")
+[ "$st" = 0 ] && ok "sourcing it again (every later stage does) still succeeds" \
+	|| fail "re-sourcing the conf.d snippet returned '$st'"
+st=$(env -u hookdir flux_fail_hook="$WORK/flux-fail.sh" \
 	bash --posix -c '. ./src/flux-fail.conf; echo "$?"' 2>/dev/null)
-[ "$rc" = 0 ] && ok "no \$hookdir (not dracut): the snippet does nothing, successfully" \
-	|| fail "without \$hookdir the conf.d snippet returned '$rc'"
+[ "$st" = 0 ] && ok "no \$hookdir (not dracut): the snippet does nothing, successfully" \
+	|| fail "without \$hookdir the conf.d snippet returned '$st'"
 mkdir -p "$WORK/nohooks"
-rc=$(source_flux_conf "$WORK/nohooks")
-if [ "$rc" = 0 ] && [ -z "$(ls -A "$WORK/nohooks")" ]; then
+st=$(source_flux_conf "$WORK/nohooks")
+if [ "$st" = 0 ] && [ -z "$(ls -A "$WORK/nohooks")" ]; then
 	ok "no emergency hook directory: nothing created, still succeeds"
 else
-	fail "with no emergency hook dir the snippet returned '$rc' or created files"
+	fail "with no emergency hook dir the snippet returned '$st' or created files"
 fi
 
 # Run what it installed the way dracut's source_hook does: sourced, with no
@@ -220,12 +222,16 @@ giveup_pass() { # <uptime seconds> [<$root>] -> the loop shell's output
 		echo "alive main_loop=$main_loop job=${job##*/}"' 2>&1 )
 }
 alive="alive main_loop=7 job=self"
-out=$(giveup_pass 100 "livenet")
-if [ "$out" = "$alive" ] && [ ! -e "$G/run/flux-giveup.at" ] && [ ! -e "$G/curl/.curlrc" ]; then
-	ok "time limit stays out of a boot that is not an anaconda network install"
-else
-	fail "time limit acted on a non-anaconda boot: '$out'"
-fi
+# A disk install, and a live CD (root=live: with no URL, so dracut sets no
+# livenet: netroot), wait on local devices - dracut's own rules apply.
+for r in "block:/dev/disk/by-label/root" "live:CDLABEL=openSUSE"; do
+	out=$(giveup_pass 100 "$r")
+	if [ "$out" = "$alive" ] && [ ! -e "$G/run/flux-giveup.at" ] && [ ! -e "$G/curl/.curlrc" ]; then
+		ok "time limit stays out of a boot that fetches nothing ($r)"
+	else
+		fail "time limit acted on a boot that fetches nothing ($r): '$out'"
+	fi
+done
 out=$(giveup_pass 100)
 read -r at _ < "$G/run/flux-giveup.at" 2>/dev/null
 [ "$out" = "$alive" ] && [ "$at" = 400 ] \
@@ -295,6 +301,15 @@ for c in tty0 ttyS0; do
 		fail "time-limit banner or its reason lines missing on /dev/$c"
 	fi
 done
+# Rows under the title are what push it off an 80x25 text screen. Measured on
+# Leap 16.0 in MANUAL (video) mode: dracut's warning, its emergency text and
+# sulogin's prompt take 13 of the 25 rows under the banner, and the shell
+# prompt after Enter one more - with 11 here the title was gone. 9 leaves it
+# on screen with a row to spare.
+under=$(awk '/INSTALL FAILED/ { n = 0; f = 1; next } f { n++ } END { print n + 0 }' "$WORK/dev/tty0")
+[ "$under" -le 9 ] \
+	&& ok "banner keeps to $under rows under its title with a two-line reason" \
+	|| fail "banner prints $under rows under its title - dracut's text below would scroll it off 80x25"
 # A reason from elsewhere can be long - Oracle's stage2 lives on a ~100-char
 # GitHub release URL - and a row that wraps costs a screen row, so the banner
 # cuts every reason row to fit 80 columns.
@@ -308,6 +323,107 @@ long=$(awk 'length > 80' "$WORK/dev/tty0")
 	&& ok "a long reason line is cut to one 80-column row" \
 	|| fail "banner row wider than 80 columns: '$long'"
 rm -f "$WORK/run/flux-fail.reason"
+
+# --- the same job, Leap 16.0's live image ------------------------------------
+# livenet fetches root=live:<url> inside ONE initqueue pass: livenetroot loops
+# over its tries from the settled hook, 100 of them unless RETRIES says
+# otherwise. So the job has two things to do there: hand that count to
+# livenetroot before the first pass reaches the settled hook - exported from
+# the loop shell, which netroot and livenetroot are children of - and open the
+# shell at the top of the first pass after the tries are spent, which is when
+# livenetroot's /tmp/livenet.downloaded exists and /dev/root does not.
+L="$WORK/livenet"; mkdir -p "$L/run" "$L/curl" "$L/tmp" "$L/bin"
+# What a real Leap 16.0 boot logs with DNS unreachable (QEMU, menu kernel line).
+cat > "$L/bin/journalctl" <<'J'
+#!/bin/sh
+m='\r  0     0    0     0    0     0      0      0 --:--:--  0:00:19 --:--:--     0'
+echo "  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current"
+printf "$m%s\r\r\n" "curl: (28) Resolving timed out after 30000 milliseconds"
+echo "Warning: failed to download live image: error 253"
+printf "$m%s\r\r\n" "curl: (6) Could not resolve host: download.opensuse.org"
+echo "Warning: Downloading 'https://download.opensuse.org/distribution/leap/16.0/installer/iso/agama-installer.x86_64-Leap_16.0.iso' failed!"
+echo "Warning: failed to download live image: error 253"
+J
+chmod +x "$L/bin/journalctl"
+LNET="livenet:https://download.opensuse.org/distribution/leap/16.0/installer/iso/agama-installer.x86_64-Leap_16.0.iso"
+livenet_pass() { # <uptime seconds> [<RETRIES from the kernel line>] -> loop shell output
+	printf '%s.42 1.00\n' "$1" > "$L/uptime"
+	( if [ -n "${2-}" ]; then export RETRIES="$2"; else unset RETRIES; fi
+	  export PATH="$L/bin:$WORK/bin:$PATH" flux_run="$L/run" flux_proc_uptime="$L/uptime" \
+		flux_dev_root="$L/devroot" flux_livenet_tried="$L/tmp/livenet.downloaded" \
+		CURL_HOME="$L/curl" root=livenet netroot="$LNET" L
+	  bash --posix -c 'emergency_shell() { echo "$*" >> "$L/emergency"; }
+		main_loop=7; job="$L/self"
+		. ./src/flux-giveup.sh
+		echo "alive main_loop=$main_loop job=${job##*/}"
+		sh -c "echo livenetroot gets RETRIES=\${RETRIES-unset}"' 2>&1 )
+}
+tries() { printf '%s\nlivenetroot gets RETRIES=%s' "$alive" "$1"; }
+out=$(livenet_pass 100)
+[ "$out" = "$(tries 10)" ] && [ ! -e "$L/emergency" ] \
+	&& ok "livenet: the first pass hands livenetroot 10 tries instead of 100, quietly" \
+	|| fail "livenet: first pass output '$out' (want the loop alive and RETRIES=10)"
+grep -qx 'connect-timeout = 30' "$L/curl/.curlrc" 2>/dev/null &&
+	grep -qx 'retry-max-time = 1' "$L/curl/.curlrc" 2>/dev/null \
+	&& ok "livenet: first pass writes the same curl caps for livenetroot's fetches" \
+	|| fail "livenet: first pass did not write the curl caps to \$CURL_HOME/.curlrc"
+out=$(livenet_pass 5000)
+[ "$out" = "$(tries 10)" ] && [ ! -e "$L/emergency" ] \
+	&& ok "livenet: before livenetroot has run (no link yet) it waits, however late" \
+	|| fail "livenet: gave up before livenetroot ever ran: '$out'"
+: > "$L/tmp/livenet.downloaded"; : > "$L/devroot"
+out=$(livenet_pass 5001)
+[ "$out" = "$(tries 10)" ] && [ ! -e "$L/emergency" ] \
+	&& ok "livenet: image in place (/dev/root exists): never gives up" \
+	|| fail "livenet: gave up although /dev/root exists: '$out'"
+rm -f "$L/devroot"
+out=$(livenet_pass 5002)
+[ "$(wc -l < "$L/emergency" 2>/dev/null)" -eq 1 ] \
+	&& ok "livenet: tries spent, no image: the emergency shell opens on the next pass" \
+	|| fail "livenet: tries spent, but emergency_shell was not called exactly once"
+grep -q "giving up" "$L/emergency" 2>/dev/null &&
+	grep -q "agama-installer.x86_64-Leap_16.0.iso" "$L/emergency" \
+	&& ok "livenet: the emergency warning names the image URL" \
+	|| fail "livenet: the emergency warning does not name the URL: '$(cat "$L/emergency" 2>/dev/null)'"
+[ "$out" = "$(tries 10)" ] \
+	&& ok "livenet: giving up returns to dracut's loop with its variables untouched" \
+	|| fail "livenet: the loop shell did not survive the give-up: '$out'"
+[ ! -e "$L/tmp/livenet.downloaded" ] \
+	&& ok "livenet: exiting the shell clears livenetroot's marker, so it tries again" \
+	|| fail "livenet: marker still there after the shell - livenetroot would never retry"
+out=$(livenet_pass 5003)
+[ "$(wc -l < "$L/emergency")" -eq 1 ] \
+	&& ok "livenet: the pass after the shell retries instead of reopening it" \
+	|| fail "livenet: the pass after the shell reopened the emergency shell"
+LR="$L/run/flux-fail.reason"
+grep -qx "no installer image from download.opensuse.org after 10 tries" "$LR" 2>/dev/null \
+	&& ok "livenet: reason file says what failed, from which host, after how many tries" \
+	|| fail "livenet: reason file is missing the what/where/how-many: '$(cat "$LR" 2>/dev/null)'"
+grep -qx "curl: (6) Could not resolve host: download.opensuse.org" "$LR" 2>/dev/null \
+	&& ok "livenet: reason file carries curl's LAST error from the journal" \
+	|| fail "livenet: reason file lacks curl's last error: '$(cat "$LR" 2>/dev/null)'"
+first=$(head -n 1 "$LR")
+[ "$(wc -l < "$LR")" -le 2 ] && [ "${#first}" -le 70 ] \
+	&& ok "livenet: reason stays within two lines, the first within 70 columns (${#first})" \
+	|| fail "livenet: reason is $(wc -l < "$LR") lines, first ${#first} columns: '$first'"
+: > "$WORK/dev/tty0"; : > "$WORK/dev/ttyS0"
+cp "$LR" "$WORK/run/flux-fail.reason"
+run_dracut_hooks
+for c in tty0 ttyS0; do
+	grep -q "Reason: no installer image from download.opensuse.org after 10 tries" "$WORK/dev/$c" \
+		&& ok "livenet: banner with the reason reached /dev/$c" \
+		|| fail "livenet: banner or its reason line missing on /dev/$c"
+done
+rm -f "$WORK/run/flux-fail.reason"
+# A systemd.setenv=RETRIES=N on the kernel line lands in dracut-initqueue's
+# environment before the job runs; the operator's number wins.
+rm -rf "$L/run" "$L/emergency"; mkdir -p "$L/run"
+out=$(livenet_pass 100 3)
+: > "$L/tmp/livenet.downloaded"
+livenet_pass 200 3 >/dev/null
+[ "$out" = "$(tries 3)" ] && grep -qx "no installer image from download.opensuse.org after 3 tries" "$LR" \
+	&& ok "livenet: RETRIES from the kernel line wins, and the reason counts it" \
+	|| fail "livenet: RETRIES=3 from the kernel line was not honoured: '$out' / '$(head -n 1 "$LR" 2>/dev/null)'"
 
 # The menu has to put both files where the snippet expects them, and must not
 # stamp ANY path through a directory the vendor initrds ship as a symlink:

@@ -274,7 +274,13 @@ imgargs 50-flux-agama.sh var/lib/dracut/hooks/pre-pivot/50-flux-agama.sh mode=75
 # 25 seconds to 15 minutes - so the shell was hours to days away. The job
 # gives up on the clock instead (src/flux-giveup.sh has the numbers). An
 # rd.retry= on these kernel lines could not do that: it shortens the count,
-# not the passes.
+# not the passes. :leap160 needs the same job for another reason: dracut's
+# livenet fetches the Agama ISO inside ONE pass, 100 tries of 92 s each with
+# DNS down, so that pass alone ran 2.5 hours. The job hands that loop ten
+# tries (RETRIES, which livenetroot reads from its environment) and opens the
+# shell on the next pass. A systemd.setenv=RETRIES= on the kernel line would
+# set the count too, but not the curl caps or the early shell, and it would
+# land in the environment of every unit of the live system as well.
 imgargs 50-flux-fail.sh flux-fail.sh mode=755 ||
 imgargs flux-fail.conf etc/conf.d/flux-fail.conf mkdir=-1 ||
 imgargs flux-giveup.sh flux-giveup.sh ||
