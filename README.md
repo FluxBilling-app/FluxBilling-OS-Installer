@@ -173,13 +173,18 @@ anything:
   console the machine has. Stock casper prints its reason and opens its debug
   shell on a single console — the serial line in automated mode — which is how
   a real failure looked like a frozen screen on an iDRAC. A `panic()` wrapper
-  injected as `/conf/param.conf` (with a matching dracut emergency hook)
-  prints a labelled **INSTALL FAILED** banner with the reason to the video
-  console *and* the serial line, states that nothing was written to the target
-  disk, and then holds: it never reboots, and it ignores a `panic=` boot
-  argument so a wedge cannot turn into a silent reboot loop. Resetting the
-  server is what returns you to the boot menu — iPXE is gone once a kernel is
-  running, so there is no way back to it from inside the installer.
+  injected as `/conf/param.conf` prints a labelled **INSTALL FAILED** banner
+  with the reason to the video console *and* the serial line, states that
+  nothing was written to the target disk, and then holds: it never reboots,
+  and it ignores a `panic=` boot argument so a wedge cannot turn into a silent
+  reboot loop. The dracut-based installers (Alma, Rocky, CentOS Stream,
+  Oracle, Leap 16.0) get the same banner from an emergency hook, run just
+  before dracut opens its emergency shell. dracut keeps that hook directory
+  under `usr/lib` on EL8/EL9 and under `var/lib` on EL10 and Leap 16, and no
+  injected path reaches both — so a small `/etc/conf.d` snippet copies the
+  hook into whichever one dracut itself uses, at boot. Resetting the server is
+  what returns you to the boot menu — iPXE is gone once a kernel is running,
+  so there is no way back to it from inside the installer.
   [src/console-ux-test.sh](src/console-ux-test.sh) asserts all of that,
   including the case that caused the original bug: only `ttyS0` registered,
   banner still reaches the video console.

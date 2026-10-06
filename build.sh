@@ -23,8 +23,8 @@ docker info >/dev/null 2>&1 || die "docker daemon is not running (start Docker D
 # 1-byte read forces iCloud to materialise the file (or fail loudly here).
 PAYLOAD=(fluxbilling.ipxe assets/FluxBilling.png assets/agama-leap16.json
          src/preseed.cfg src/99fluxseed src/param.conf src/flux-mirror-pick src/ks.cfg
-         src/autoinst.xml src/50-flux-agama.sh src/50-flux-fail.sh src/flux-scrub
-         src/flux-scrub.service src/pve-bashrc
+         src/autoinst.xml src/50-flux-agama.sh src/50-flux-fail.sh src/flux-fail.conf
+         src/flux-scrub src/flux-scrub.service src/pve-bashrc
          src/logo-compose.py src/builder.Dockerfile src/fluxcidr_cmd.c
          src/efi-console-ilo4.patch)
 for f in "${PAYLOAD[@]}"; do
@@ -67,9 +67,10 @@ docker run --rm --platform linux/amd64 -v "$PWD":/w "$BUILDER" bash -exc '
   # EMBEDLIST must match the image exactly so make stays incremental.
   cp /w/fluxbilling.ipxe /w/src/preseed.cfg /w/src/99fluxseed \
      /w/src/param.conf /w/src/flux-mirror-pick /w/src/ks.cfg /w/src/autoinst.xml \
-     /w/src/50-flux-agama.sh /w/src/50-flux-fail.sh /w/assets/agama-leap16.json \
-     /w/src/flux-scrub /w/src/flux-scrub.service /w/src/pve-bashrc /work/
-  EMBEDLIST=/work/fluxbilling.ipxe,/work/logo.png,/work/preseed.cfg,/work/99fluxseed,/work/param.conf,/work/flux-mirror-pick,/work/ks.cfg,/work/autoinst.xml,/work/agama-leap16.json,/work/50-flux-agama.sh,/work/50-flux-fail.sh,/work/flux-scrub,/work/flux-scrub.service,/work/pve-bashrc
+     /w/src/50-flux-agama.sh /w/src/50-flux-fail.sh /w/src/flux-fail.conf \
+     /w/assets/agama-leap16.json /w/src/flux-scrub /w/src/flux-scrub.service \
+     /w/src/pve-bashrc /work/
+  EMBEDLIST=/work/fluxbilling.ipxe,/work/logo.png,/work/preseed.cfg,/work/99fluxseed,/work/param.conf,/work/flux-mirror-pick,/work/ks.cfg,/work/autoinst.xml,/work/agama-leap16.json,/work/50-flux-agama.sh,/work/50-flux-fail.sh,/work/flux-fail.conf,/work/flux-scrub,/work/flux-scrub.service,/work/pve-bashrc
   # Every name in EMBEDLIST must actually be staged in /work. Adding a payload
   # file means touching the cp above AND the list below, and forgetting the cp
   # half fails deep inside the iPXE make with a path nobody recognises - the

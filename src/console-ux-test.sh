@@ -106,6 +106,87 @@ grep -q "INSTALL FAILED" "$WORK/dev/tty0" \
 	&& ok "video console still gets the banner when only ttyS0 is registered" \
 	|| fail "video console missed the banner - the original bug is back"
 
+# --- dracut half, delivery: src/flux-fail.conf --------------------------------
+# No cpio path reaches dracut's hook directory on every release (the imgargs
+# block in fluxbilling.ipxe has why), so the hook rides in at the initramfs
+# root and a conf.d snippet copies it into $hookdir when a dracut stage sources
+# /etc/conf.d. EVERY stage sources that snippet, and dracut's sh is bash in
+# POSIX mode, where a `.` file that does not parse ends the sourcing script -
+# so a typo here would stop every dracut install cold, not just the banner.
+for f in src/flux-fail.conf src/50-flux-fail.sh; do
+	bash --posix -n "$f" 2>/dev/null && ok "$f parses as POSIX-mode bash" \
+		|| fail "$f does not parse - a dracut stage that sources it would die"
+	if command -v dash >/dev/null 2>&1; then
+		dash -n "$f" 2>/dev/null && ok "$f parses as dash" \
+			|| fail "$f does not parse as dash"
+	fi
+done
+
+# Source it the way dracut's source_conf does, with $hookdir pointing at a
+# stand-in hook tree.
+mkdir -p "$WORK/hooks/emergency"
+cp ./src/50-flux-fail.sh "$WORK/flux-fail.sh"
+source_flux_conf() { # <hookdir> -> prints the status the snippet left behind
+	hookdir=$1 flux_fail_hook="$WORK/flux-fail.sh" \
+		bash --posix -c '. ./src/flux-fail.conf; echo "$?"' 2>/dev/null
+}
+rc=$(source_flux_conf "$WORK/hooks")
+if [ "$rc" = 0 ] && cmp -s "$WORK/hooks/emergency/50-flux-fail.sh" ./src/50-flux-fail.sh; then
+	ok "conf.d snippet installs the hook into \$hookdir/emergency"
+else
+	fail "conf.d snippet did not install the hook (status '$rc')"
+fi
+rc=$(source_flux_conf "$WORK/hooks")
+[ "$rc" = 0 ] && ok "sourcing it again (every later stage does) still succeeds" \
+	|| fail "re-sourcing the conf.d snippet returned '$rc'"
+rc=$(env -u hookdir flux_fail_hook="$WORK/flux-fail.sh" \
+	bash --posix -c '. ./src/flux-fail.conf; echo "$?"' 2>/dev/null)
+[ "$rc" = 0 ] && ok "no \$hookdir (not dracut): the snippet does nothing, successfully" \
+	|| fail "without \$hookdir the conf.d snippet returned '$rc'"
+mkdir -p "$WORK/nohooks"
+rc=$(source_flux_conf "$WORK/nohooks")
+if [ "$rc" = 0 ] && [ -z "$(ls -A "$WORK/nohooks")" ]; then
+	ok "no emergency hook directory: nothing created, still succeeds"
+else
+	fail "with no emergency hook dir the snippet returned '$rc' or created files"
+fi
+
+# Run what it installed the way dracut's source_hook does: sourced, with no
+# arguments - so the operator gets the default reason, not an empty one.
+: > "$WORK/dev/tty0"; : > "$WORK/dev/ttyS0"
+printf 'ttyS0                -W- (EC p  a)    4:64\ntty0                 -WU (EC p  )    4:1\n' > "$WORK/consoles"
+( export flux_devdir="$WORK/dev" flux_proc_consoles="$WORK/consoles" hd="$WORK/hooks/emergency"
+  bash --posix -c 'for f in "$hd"/*.sh; do [ -e "$f" ] && . "$f"; done' >/dev/null 2>&1 )
+for c in tty0 ttyS0; do
+	if grep -q "INSTALL FAILED" "$WORK/dev/$c" 2>/dev/null; then
+		ok "installed hook, run as dracut runs it, reached /dev/$c"
+	else
+		fail "installed hook, run as dracut runs it, never reached /dev/$c"
+	fi
+done
+grep -q "stopped without a message" "$WORK/dev/tty0" \
+	&& ok "dracut passes no reason, so the banner falls back to its default" \
+	|| fail "the hook printed no reason line when dracut passed none"
+
+# The menu has to put both files where the snippet expects them, and must not
+# stamp ANY path through a directory the vendor initrds ship as a symlink:
+# those files unpack before the vendor's, so the path is either dropped or,
+# with mkdir=, turned into a real directory that the vendor symlink can no
+# longer replace (that is how an EL initrd loses /lib/dracut-lib.sh).
+conf_path=$(sed -n 's|^imgargs flux-fail\.conf \([^ ]*\).*|\1|p' fluxbilling.ipxe)
+hook_path=$(sed -n 's|^imgargs 50-flux-fail\.sh \([^ ]*\).*|\1|p' fluxbilling.ipxe)
+want_hook=$(sed -n 's|.*${flux_fail_hook:-/\([^}]*\)}.*|\1|p' src/flux-fail.conf)
+[ "$conf_path" = "etc/conf.d/flux-fail.conf" ] \
+	&& ok "menu stamps the snippet into etc/conf.d" \
+	|| fail "menu stamps flux-fail.conf at '$conf_path', not etc/conf.d/flux-fail.conf"
+[ -n "$hook_path" ] && [ "$hook_path" = "$want_hook" ] \
+	&& ok "menu puts the hook where the snippet copies it from (/$hook_path)" \
+	|| fail "menu puts the hook at '$hook_path', the snippet copies '/$want_hook'"
+bad=$(sed -n 's|^imgargs [^ ]* \([^ ]*\).*|\1|p' fluxbilling.ipxe |
+	grep -E '^(lib|lib64|bin|sbin)/|^usr/lib/dracut/hooks/' | tr '\n' ' ')
+[ -z "$bad" ] && ok "no injected path runs through a vendor symlink" \
+	|| fail "injected path(s) through a vendor symlink: $bad"
+
 # --- progress watcher: src/param.conf ---------------------------------------
 # A fake /proc holding one wget whose -O target is a file we control, and a
 # /proc/consoles that names ttyS0 first - the AUTOMATED-mode layout, where the

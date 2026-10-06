@@ -207,8 +207,9 @@ set ns2 1.1.1.1
 
 console --x 800 --y 600 --picture logo.png ||
 
-# Stamp each bundled helper file with its cpio path exactly once - they get
-# appended to every Linux boot and simply go unread where they don't apply.
+# Stamp each bundled helper file with its cpio path exactly once - they ride
+# into every Linux boot (unpacked ahead of the vendor initrd, see the
+# failure-banner note below) and simply go unread where they don't apply.
 # This must be imgargs, never initrd: EMBED already loaded these images, so
 # `initrd <name>` would try to DOWNLOAD the bare name, die with "Operation not
 # supported" (no scheme, no base URI) before the cpio name is ever set, then
@@ -242,10 +243,32 @@ imgargs flux-scrub.service flux-scrub.service ||
 imgargs agama-leap16.json flux-agama.json ||
 imgargs 50-flux-agama.sh var/lib/dracut/hooks/pre-pivot/50-flux-agama.sh mode=755 mkdir=-1 ||
 # The failure banner's dracut half. param.conf carries the casper half (a
-# panic() wrapper); this one runs before dracut opens its emergency shell. An
-# initramfs that is not dracut never looks in this directory, so it costs the
-# other families nothing but the bytes.
-imgargs 50-flux-fail.sh var/lib/dracut/hooks/emergency/50-flux-fail.sh mode=755 mkdir=-1 ||
+# panic() wrapper); src/50-flux-fail.sh is a dracut emergency hook, run just
+# before dracut opens its emergency shell. It cannot be injected straight INTO
+# the hook directory, because of how this chain unpacks:
+#  - iPXE lays images out in registration order, and EMBEDded files register
+#    at startup, before any kernel or initrd is fetched. Everything stamped
+#    here unpacks BEFORE the vendor initrd, while none of its directories or
+#    symlinks exist yet.
+#  - dracut reads /lib/dracut/hooks on every release, but on EL8/EL9 that is a
+#    real directory under usr/lib, and on EL10 and Leap 16 a symlink into
+#    var/lib/dracut/hooks.
+# So lib/dracut/hooks/... is dropped outright (no lib yet), and
+# var/lib/dracut/hooks/... works on EL10/Leap 16 only - which is how this hook
+# went silent on every EL8/EL9 entry. mkdir= makes it worse, not better: the
+# directories it creates come first, so the vendor's lib -> usr/lib (or
+# hooks -> var/lib) symlink can no longer be laid over them, and dracut loses
+# its own library ("/lib/dracut-lib.sh: No such file or directory") or every
+# vendor hook. Never stamp a path through lib/, bin/, sbin/ or
+# usr/lib/dracut/hooks.
+# Instead the hook rides in at the root, and flux-fail.conf copies it into
+# $hookdir at boot: each dracut stage script sources /etc/conf.d/*.conf,
+# dracut-emergency right before it runs the emergency hooks, and by then
+# dracut has resolved its own hook path. mkdir= is safe on that one because
+# /etc is a real directory in every initrd and /etc/conf.d in every dracut
+# one. Initramfs flavours that are not dracut never read either file.
+imgargs 50-flux-fail.sh flux-fail.sh mode=755 ||
+imgargs flux-fail.conf etc/conf.d/flux-fail.conf mkdir=-1 ||
 # Proxmox automated-install hook. The one family whose installer offers no
 # answer-file argument at all on a stock ISO: unconfigured.sh only runs
 # proxmox-fetch-answer when /cdrom/auto-installer-mode.toml exists, a file
@@ -254,13 +277,15 @@ imgargs 50-flux-fail.sh var/lib/dracut/hooks/emergency/50-flux-fail.sh mode=755 
 # which is bash, and interactive bash sources /etc/bash.bashrc. This file IS
 # that manual step, automated: it generates /run/automatic-installer-answers
 # from the kernel command line and exits the shell, and unconfigured.sh feeds
-# that file to proxmox-auto-installer regardless of how it appeared. cpio
-# ordering makes the override safe: iPXE appends these entries after the
-# vendor initrd, and later initramfs entries replace earlier ones. Inert
-# everywhere else - it acts only when fluxpveauto=1 (set by :os_pick in
-# automated mode for the pve entries only) AND the proxmox-auto-installer
-# binary are both present; other families' initrds either never source it
-# (busybox sh in d-i/casper) or fail the guards (dracut emergency shells).
+# that file to proxmox-auto-installer regardless of how it appeared. This
+# copy does NOT override one inside the vendor initrd: it unpacks first (see
+# the failure-banner note above), and a later initramfs entry replaces an
+# earlier one - which is why src/sign-boot-images.sh bakes the hook into the
+# Proxmox boot initrd itself. Inert everywhere else - it acts only when
+# fluxpveauto=1 (set by :os_pick in automated mode for the pve entries only)
+# AND the proxmox-auto-installer binary are both present; other families'
+# initrds either never source it (busybox sh in d-i/casper) or fail the guards
+# (dracut emergency shells).
 imgargs pve-bashrc etc/bash.bashrc mkdir=-1 ||
 # logo.png is deliberately NOT stamped here. It is true that iPXE splices every
 # still-registered image into the initrd chain (image/initrd.c skips only

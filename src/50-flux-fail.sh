@@ -9,10 +9,11 @@
 # on an iDRAC/iLO screen as well. It does not reboot and does not change what
 # dracut does next.
 #
-# Injected as var/lib/dracut/hooks/emergency/50-flux-fail.sh - the same hook
-# directory the Agama pre-pivot script already rides in on (see the imgargs
-# block in fluxbilling.ipxe); a kernel whose initramfs is not dracut simply
-# never runs it.
+# Injected at the initramfs root as /flux-fail.sh, and copied into dracut's
+# own emergency hook directory at boot by src/flux-fail.conf - no cpio path
+# reaches that directory on every release (EL8/EL9 keep it in usr/lib, EL10
+# and Leap 16 in var/lib; the imgargs block in fluxbilling.ipxe has why). An
+# initramfs that is not dracut never copies it, so it never runs there.
 flux_reason="${1:-the installer stopped without a message}"
 # Both paths are variables so src/console-ux-test.sh can aim them at a temp
 # directory; in a real initramfs they are the defaults.
