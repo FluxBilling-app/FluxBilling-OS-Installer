@@ -62,7 +62,9 @@ expect_fail "unmirrored-image" "no 'ubuntu-20.04' row" fluxbilling.ipxe "$WORK/m
 if [ "$NET" = 1 ]; then
   # 7. The real 2026-09-15 bug: casper pointed back at the frozen point-release
   #    ISO while the netboot tree has moved on. Needs upstream to compare.
-  sed 's|^set img2404 .*|set img2404 ${ubu_rel}/${rel2404}/ubuntu-${rel2404}-live-server-amd64.iso|' \
+  #    Pinned to 24.04.4, the ISO that bug downloaded: the menu's own
+  #    ${rel2404} now names the point release the netboot tree belongs to.
+  sed 's|^set img2404 .*|set img2404 ${ubu_rel}/24.04.4/ubuntu-24.04.4-live-server-amd64.iso|' \
     fluxbilling.ipxe > "$WORK/frozen-iso.ipxe"
   expect_fail "casper-drift" "is NOT in the ISO" "$WORK/frozen-iso.ipxe"
 fi

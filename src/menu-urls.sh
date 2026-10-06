@@ -95,10 +95,10 @@ for tag in $casper_rels; do
   emit ipxe "$boot/$kname"
   emit ipxe "$boot/initrd"
   # The ISO the initrd downloads - read from img<tag>, never rebuilt from
-  # $rel: 24.04/26.04 boot the codename -latest- alias so that ISO and the
-  # netboot images above stay one compose (see the img*/boot* note in the
-  # menu), and a reconstructed point-release URL would have the watchdog
-  # probing an image nothing boots.
+  # $rel: 26.04 boots the codename -latest- alias and 24.04 a point release
+  # inside the codename tree, so that ISO and the netboot images above stay
+  # one compose (see the img*/boot* note in the menu), and a reconstructed
+  # URL would have the watchdog probing an image nothing boots.
   emit bulk "$img"
   # :casper_fallback's target for this release - diagnostic, see the header.
   emit alt "http://old-releases.ubuntu.com/releases/$rel/netboot/amd64/$kname"

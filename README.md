@@ -170,10 +170,12 @@ anything:
   signing manifest extracted from. An entry with no rule fails the build, so
   the next distro cannot ship unverified, and
   [src/pairing-selftest.sh](src/pairing-selftest.sh) proves the gate still
-  rejects each breakage it was written for. The Ubuntu entries ride the
-  codename alias (`noble/`, `resolute/` plus `ubuntu-<ver>-latest-…iso`),
-  which upstream rebuilds as one compose; 22.04 has no codename netboot tree,
-  so it keeps a pin frozen on both halves.
+  rejects each breakage it was written for. The Ubuntu entries boot from the
+  codename tree (`noble/`, `resolute/`), whose netboot images upstream
+  rebuilds alongside the newest point-release ISO: 26.04 rides the
+  `ubuntu-26.04-latest-…iso` alias, and 24.04 names that ISO (24.04.5)
+  itself, since Canonical stopped serving the noble alias; 22.04 has no
+  codename netboot tree, so it keeps a pin frozen on both halves.
 - **A readable failure.** If an installer does stop, it says so on every
   console the machine has. Stock casper prints its reason and opens its debug
   shell on a single console — the serial line in automated mode — which is how
